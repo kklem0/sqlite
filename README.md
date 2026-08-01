@@ -13,7 +13,7 @@
 > ships with a browser test suite that runs every contract test on both storage tiers.
 >
 > **Why a fork exists at all.** The work is offered upstream, and the fork is meant to be retired
-> rather than maintained: see the upstream discussion at <!-- UPSTREAM_ISSUE -->`#<issue>`<!-- /UPSTREAM_ISSUE -->.
+> rather than maintained: see the upstream discussion at [capacitor-community/sqlite#693](https://github.com/capacitor-community/sqlite/issues/693).
 > **Switch back to `@capacitor-community/sqlite` as soon as upstream merges it.** Nothing in the
 > public API differs, so switching back is a dependency change and a reinstall.
 >
