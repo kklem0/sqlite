@@ -1,8 +1,12 @@
 > ## This is a fork: `sssf-capacitor-sqlite`
 >
 > A fork of [`@capacitor-community/sqlite`](https://github.com/capacitor-community/sqlite) whose
-> **Web implementation has been rewritten**. Native (iOS, Android) and Electron are untouched and
-> track upstream exactly.
+> **Web implementation has been rewritten**. Native (iOS, Android) and Electron track upstream,
+> and additionally carry only those changes this fork already has open as upstream pull requests,
+> so they retire on their own when upstream merges. Nothing native is invented here. Right now
+> that means [capacitor-community/sqlite#696](https://github.com/capacitor-community/sqlite/pull/696):
+> SQLCipher pinned on both iOS dependency managers, with Swift Package Manager as the verified
+> path.
 >
 > **What changed.** The web engine was `jeep-sqlite`, a Stencil element wrapping `sql.js` in
 > memory with whole-database images in IndexedDB, last published in August 2024. This fork
