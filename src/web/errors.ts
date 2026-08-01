@@ -22,11 +22,25 @@ export const MULTI_TAB_LOCKED =
  * dependency of int64 that no transpiler can supply. Anything else is almost always the bundler
  * failing to serve `dist/web-worker.js` or `dist/sqlite3.wasm`.
  *
+ * One parse failure is not an old engine at all, and it is the common one: a worker URL that
+ * 404s is answered with the application's own HTML, and the browser then reports
+ * `Unexpected token '<'` on a perfectly modern engine. Checked first, because a missing asset
+ * blamed on the user's browser sends them somewhere there is no fix.
+ *
  * The raw browser message is always appended: a guess that hides the evidence is worse than no
  * guess at all.
  */
 export function workerLoadFailure(raw: string): SQLiteWebError {
   const detail = raw && raw.trim().length > 0 ? raw.trim() : 'no further detail from the browser';
+  if (/Unexpected token ['"`<]?</.test(detail) || /<!DOCTYPE|<html/i.test(detail)) {
+    return new SQLiteWebError(
+      'The SQLite worker URL returned HTML instead of JavaScript, which means it did not resolve: ' +
+        'your bundler is not emitting dist/web-worker.js, or the server answered the request with ' +
+        'the application page. Serve dist/web-worker.js and dist/sqlite3.wasm side by side, or ' +
+        `supply your own worker with setSqliteWorkerFactory(). Browser reported: ${detail}`,
+      { name: 'SQLiteWebWorkerLoadError', code: 'WORKER_LOAD_FAILED' },
+    );
+  }
   if (/SyntaxError|Unexpected (token|identifier|end of input)/i.test(detail)) {
     return new SQLiteWebError(
       'The SQLite worker could not be parsed by this browser, which means it is below the minimum ' +
