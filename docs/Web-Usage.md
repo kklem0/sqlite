@@ -122,13 +122,30 @@ closing every connection on a tab switch would be a bug rather than a protection
 
 ## Serving the worker and the wasm
 
-The default path needs no configuration: the plugin builds its worker from `dist/web-worker.js`
-inside the package, and that worker loads `dist/sqlite3.wasm` sitting next to it. Vite, Angular's
-builder and webpack 5 all resolve and emit both files without help, and Capacitor copies them into
-the native web assets on `npx cap sync`.
+The plugin builds its worker from `dist/web-worker.js` inside the package, and that worker loads
+`dist/sqlite3.wasm` sitting next to it. Whether your bundler follows that on its own depends on
+the bundler, because the worker URL is computed at runtime rather than written as a literal
+`new URL('...', import.meta.url)`. Serving the two files yourself is two lines and always works,
+so prefer it if you would rather not find out:
 
-Two escape hatches exist for setups where that resolution fails, both additive exports of the
-plugin and both to be called before `initWebStore()`:
+```ts
+import { setSqliteWorkerFactory } from '@capacitor-community/sqlite';
+
+// Copy dist/web-worker.js and dist/sqlite3.wasm from the package into the folder your app serves
+// as its web root (public/ for Vite, src/assets/ for Angular, and so on). Keeping them side by
+// side is all the wasm needs: the worker resolves it as its own sibling.
+setSqliteWorkerFactory(() => new Worker(new URL('web-worker.js', document.baseURI)));
+```
+
+Under Capacitor, files in the web root are copied into the native app by `npx cap sync`, so the
+same two lines cover iOS and Android.
+
+**Vite needs this.** Measured with Vite 7: the plugin's runtime-computed URL is rewritten to point
+at a module of the plugin's own that Vite emits as an asset, `web-worker.js` is never emitted, and
+the request 404s. The symptom is an `initWebStore()` rejection quoting
+`Unexpected token '<'`, which is the application's HTML answering the worker request.
+
+Two further escape hatches, both additive exports and both to be called before `initWebStore()`:
 
 ```ts
 import { setSqliteWebOptions, setSqliteWorkerFactory } from '@capacitor-community/sqlite';
@@ -136,7 +153,7 @@ import { setSqliteWebOptions, setSqliteWorkerFactory } from '@capacitor-communit
 // 1. The wasm is served from somewhere else, for instance a CDN or a hashed asset path.
 setSqliteWebOptions({ wasmUrl: '/assets/sqlite3.wasm' });
 
-// 2. The bundler inlines the plugin and loses the worker URL. Build the worker yourself.
+// 2. Your bundler does emit the worker, and you would rather it owned the URL.
 setSqliteWorkerFactory(() => new Worker(new URL('./web-worker.js', import.meta.url)));
 ```
 
@@ -1643,15 +1660,21 @@ that is it.
   rather than being handed an empty database on top of your real data. Close the other tab. In
   development, remember that a stale tab or a detached DevTools window still counts as a tab.
 
-* **`initWebStore()` rejects and the console shows a worker load failure or a `SyntaxError`.**
+* **`initWebStore()` rejects quoting `Unexpected token '<'`.** The worker URL 404s and the server
+  answered with your application's HTML, so this is a bundler problem and not a browser one, on
+  any browser. See [Serving the worker and the wasm](#serving-the-worker-and-the-wasm); with Vite
+  it is the expected default. The error the plugin raises says the same thing and carries the
+  code `WORKER_LOAD_FAILED`.
+
+* **`initWebStore()` rejects with `UNSUPPORTED_ENGINE` and some other `SyntaxError`.**
   The browser is below the engine floor described under
   [Requirements and browser support](#requirements-and-browser-support). This is not something the
   plugin falls back from, and lowering your app's build target will not help: the syntax that
   fails to parse belongs to `@sqlite.org/sqlite-wasm` itself.
 
-* **The worker or `sqlite3.wasm` cannot be found (a 404 in the network panel).** Your bundler did
-  not emit the plugin's assets where the plugin looks for them. Use
-  `setSqliteWebOptions({ wasmUrl })` or `setSqliteWorkerFactory()` from
+* **`sqlite3.wasm` cannot be found (a 404 in the network panel).** The worker looks for it as its
+  own sibling. Either put it next to the worker or point at it with
+  `setSqliteWebOptions({ wasmUrl })` from
   [Serving the worker and the wasm](#serving-the-worker-and-the-wasm).
 
 * **Data disappears between reloads.** You are almost certainly on tier 2 and never reached a
