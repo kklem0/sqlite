@@ -32,6 +32,9 @@ import type {
   capSQLiteValues,
   capSQLiteVersionUpgrade,
   capVersionResult,
+  capSQLiteImportDatabaseOptions,
+  capSQLiteImportDatabaseResult,
+  capWebStoreInfo,
   JsonSQLite,
   Changes,
 } from '../../src/definitions';
@@ -1062,6 +1065,15 @@ export class CapacitorSQLite implements CapacitorSQLitePlugin {
   }
 
   async initWebStore(): Promise<void> {
+    throw new Error('Method not implemented.');
+  }
+
+  async importDatabase(options: capSQLiteImportDatabaseOptions): Promise<capSQLiteImportDatabaseResult> {
+    console.log(`${JSON.stringify(options.database)}`);
+    throw new Error('Method not implemented.');
+  }
+
+  async getWebStoreInfo(): Promise<capWebStoreInfo> {
     throw new Error('Method not implemented.');
   }
 
