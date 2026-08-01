@@ -129,6 +129,31 @@ There are two separate floors, and they mean different things:
 | Engine (`BigInt`, optional chaining, nullish coalescing) | 80 | 14 | 74 | **The plugin does not load at all.** The failure is a syntax error inside the SQLite build, not a fallback, and no transpiler setting in your app can change it. |
 | Durability (OPFS sync access handles) | 108 | 16.4 | 111 | Tier 2 above: everything works, the database is an image in IndexedDB rather than a file. Android WebView reached this in M132, January 2025. |
 
+#### Who actually lands on tier 2
+
+Tier 2 is chosen at `initWebStore()` when the browser lacks OPFS sync access handles:
+concretely, `navigator.storage.getDirectory` or
+`FileSystemFileHandle.prototype.createSyncAccessHandle` is missing, or the SQLite build's own
+API version check rejects. In browser versions that means Safari / iOS WebKit 14 to 16.3,
+Chromium 80 to 107, Firefox 74 to 110, and Android System WebView before M132 (January 2025).
+Two version-independent cases: Safari private browsing always runs tier 2 (OPFS is unavailable
+there on every Safari version), and a store already owned by another tab is an explicit error,
+never a silent drop to tier 2.
+
+How much traffic that is: measured against caniuse-lite 1.0.30001806 (StatCounter data,
+checked 2026-08), the whole tier 2 version band is about **1.4% of global browser usage**:
+Safari / iOS 14-16.3 at ~0.5%, Chromium 80-107 remnants at ~0.9%, Firefox 74-110 at ~0.01%.
+Put differently, of the usage that can load this plugin at all, **roughly 98% runs tier 1 and
+under 2% lands on tier 2**, and the band shrinks as evergreen browsers update. In-app WebView
+versions are not visible to StatCounter, so treat WebViews older than M132 (devices without
+Google Play services, or with WebView updates disabled) as a small qualitative extra on top.
+
+Why the tier stays despite the small share: Capacitor 8 itself supports iOS 15.0+ and Android
+API 24+ with WebViews as old as Chrome 60, so the platform's official support envelope reaches
+below the tier 1 floor, and a Capacitor plugin should not fail where Capacitor does not; and
+Safari private browsing is tier 2 forever regardless of version, so the tier is the difference
+between an app that works ephemerally in a private tab and one that is simply broken there.
+
 #### Other things worth knowing
 
 - **One tab at a time.** OPFS access handles are single-owner by design, so `initWebStore()` fails with an explicit error if another tab of the same origin already owns the store.
