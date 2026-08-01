@@ -12,6 +12,8 @@
 * [`saveToStore(...)`](#savetostore)
 * [`getFromLocalDiskToStore(...)`](#getfromlocaldisktostore)
 * [`saveToLocalDisk(...)`](#savetolocaldisk)
+* [`importDatabase(...)`](#importdatabase)
+* [`getWebStoreInfo()`](#getwebstoreinfo)
 * [`echo(...)`](#echo)
 * [`isSecretStored()`](#issecretstored)
 * [`setEncryptionSecret(...)`](#setencryptionsecret)
@@ -46,6 +48,7 @@
 * [`deleteOldDatabases(...)`](#deleteolddatabases)
 * [`moveDatabasesAndAddSuffix(...)`](#movedatabasesandaddsuffix)
 * [Interfaces](#interfaces)
+* [Type Aliases](#type-aliases)
 
 </docgen-index>
 
@@ -124,6 +127,43 @@ Save database to local disk
 | **`database`** | <code>string</code> | : string    |
 
 **Since:** 4.6.3
+
+--------------------
+
+
+### importDatabase(...)
+
+```typescript
+importDatabase(database: string, source: capSQLiteImportSource, overwrite?: boolean | undefined, totalBytes?: number | undefined) => Promise<capSQLiteImportDatabaseResult>
+```
+
+Import a database from bytes the caller supplies (Web only)
+
+| Param            | Type                                                                    | Description                                                      |
+| ---------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **`database`**   | <code>string</code>                                                     |                                                                  |
+| **`source`**     | <code><a href="#capsqliteimportsource">capSQLiteImportSource</a></code> | <a href="#uint8array">Uint8Array</a>, Blob or ReadableStream     |
+| **`overwrite`**  | <code>boolean</code>                                                    | replace an existing database of that name                        |
+| **`totalBytes`** | <code>number</code>                                                     | total length, for progress when the source cannot report its own |
+
+**Returns:** <code>Promise&lt;<a href="#capsqliteimportdatabaseresult">capSQLiteImportDatabaseResult</a>&gt;</code>
+
+**Since:** 8.2.0
+
+--------------------
+
+
+### getWebStoreInfo()
+
+```typescript
+getWebStoreInfo() => Promise<capWebStoreInfo>
+```
+
+Report how the web store is persisting data, and how much room it has (Web only)
+
+**Returns:** <code>Promise&lt;<a href="#capwebstoreinfo">capWebStoreInfo</a>&gt;</code>
+
+**Since:** 8.2.0
 
 --------------------
 
@@ -716,6 +756,104 @@ This resembles calling addSQLiteSuffix and deleteOldDatabases, but it is more pe
 ### Interfaces
 
 
+#### capSQLiteImportDatabaseResult
+
+| Prop           | Type                 | Description                                                |
+| -------------- | -------------------- | ---------------------------------------------------------- |
+| **`database`** | <code>string</code>  | The database that was imported                             |
+| **`bytes`**    | <code>number</code>  | Bytes read from the source                                 |
+| **`replaced`** | <code>boolean</code> | "true" when an existing database of that name was replaced |
+
+
+#### Uint8Array
+
+A typed array of 8-bit unsigned integer values. The contents are initialized to 0. If the
+requested number of bytes could not be allocated an exception is raised.
+
+| Prop                    | Type                                                        | Description                                                                  |
+| ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **`BYTES_PER_ELEMENT`** | <code>number</code>                                         | The size in bytes of each element in the array.                              |
+| **`buffer`**            | <code><a href="#arraybufferlike">ArrayBufferLike</a></code> | The <a href="#arraybuffer">ArrayBuffer</a> instance referenced by the array. |
+| **`byteLength`**        | <code>number</code>                                         | The length in bytes of the array.                                            |
+| **`byteOffset`**        | <code>number</code>                                         | The offset in bytes of the array.                                            |
+| **`length`**            | <code>number</code>                                         | The length of the array.                                                     |
+
+| Method             | Signature                                                                                                                                                                      | Description                                                                                                                                                                                                                                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **copyWithin**     | (target: number, start: number, end?: number \| undefined) =&gt; this                                                                                                          | Returns the this object after copying a section of the array identified by start and end to the same array starting at position target                                                                                                      |
+| **every**          | (predicate: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; unknown, thisArg?: any) =&gt; boolean                                            | Determines whether all the members of an array satisfy the specified test.                                                                                                                                                                  |
+| **fill**           | (value: number, start?: number \| undefined, end?: number \| undefined) =&gt; this                                                                                             | Returns the this object after filling the section identified by start and end with value                                                                                                                                                    |
+| **filter**         | (predicate: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; any, thisArg?: any) =&gt; <a href="#uint8array">Uint8Array</a>                   | Returns the elements of an array that meet the condition specified in a callback function.                                                                                                                                                  |
+| **find**           | (predicate: (value: number, index: number, obj: <a href="#uint8array">Uint8Array</a>) =&gt; boolean, thisArg?: any) =&gt; number \| undefined                                  | Returns the value of the first element in the array where predicate is true, and undefined otherwise.                                                                                                                                       |
+| **findIndex**      | (predicate: (value: number, index: number, obj: <a href="#uint8array">Uint8Array</a>) =&gt; boolean, thisArg?: any) =&gt; number                                               | Returns the index of the first element in the array where predicate is true, and -1 otherwise.                                                                                                                                              |
+| **forEach**        | (callbackfn: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; void, thisArg?: any) =&gt; void                                                 | Performs the specified action for each element in an array.                                                                                                                                                                                 |
+| **indexOf**        | (searchElement: number, fromIndex?: number \| undefined) =&gt; number                                                                                                          | Returns the index of the first occurrence of a value in an array.                                                                                                                                                                           |
+| **join**           | (separator?: string \| undefined) =&gt; string                                                                                                                                 | Adds all the elements of an array separated by the specified separator string.                                                                                                                                                              |
+| **lastIndexOf**    | (searchElement: number, fromIndex?: number \| undefined) =&gt; number                                                                                                          | Returns the index of the last occurrence of a value in an array.                                                                                                                                                                            |
+| **map**            | (callbackfn: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number, thisArg?: any) =&gt; <a href="#uint8array">Uint8Array</a>               | Calls a defined callback function on each element of an array, and returns an array that contains the results.                                                                                                                              |
+| **reduce**         | (callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number) =&gt; number                       | Calls the specified callback function for all the elements in an array. The return value of the callback function is the accumulated result, and is provided as an argument in the next call to the callback function.                      |
+| **reduce**         | (callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number, initialValue: number) =&gt; number |                                                                                                                                                                                                                                             |
+| **reduce**         | &lt;U&gt;(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; U, initialValue: U) =&gt; U            | Calls the specified callback function for all the elements in an array. The return value of the callback function is the accumulated result, and is provided as an argument in the next call to the callback function.                      |
+| **reduceRight**    | (callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number) =&gt; number                       | Calls the specified callback function for all the elements in an array, in descending order. The return value of the callback function is the accumulated result, and is provided as an argument in the next call to the callback function. |
+| **reduceRight**    | (callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number, initialValue: number) =&gt; number |                                                                                                                                                                                                                                             |
+| **reduceRight**    | &lt;U&gt;(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; U, initialValue: U) =&gt; U            | Calls the specified callback function for all the elements in an array, in descending order. The return value of the callback function is the accumulated result, and is provided as an argument in the next call to the callback function. |
+| **reverse**        | () =&gt; <a href="#uint8array">Uint8Array</a>                                                                                                                                  | Reverses the elements in an Array.                                                                                                                                                                                                          |
+| **set**            | (array: <a href="#arraylike">ArrayLike</a>&lt;number&gt;, offset?: number \| undefined) =&gt; void                                                                             | Sets a value or an array of values.                                                                                                                                                                                                         |
+| **slice**          | (start?: number \| undefined, end?: number \| undefined) =&gt; <a href="#uint8array">Uint8Array</a>                                                                            | Returns a section of an array.                                                                                                                                                                                                              |
+| **some**           | (predicate: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; unknown, thisArg?: any) =&gt; boolean                                            | Determines whether the specified callback function returns true for any element of an array.                                                                                                                                                |
+| **sort**           | (compareFn?: ((a: number, b: number) =&gt; number) \| undefined) =&gt; this                                                                                                    | Sorts an array.                                                                                                                                                                                                                             |
+| **subarray**       | (begin?: number \| undefined, end?: number \| undefined) =&gt; <a href="#uint8array">Uint8Array</a>                                                                            | Gets a new <a href="#uint8array">Uint8Array</a> view of the <a href="#arraybuffer">ArrayBuffer</a> store for this array, referencing the elements at begin, inclusive, up to end, exclusive.                                                |
+| **toLocaleString** | () =&gt; string                                                                                                                                                                | Converts a number to a string by using the current locale.                                                                                                                                                                                  |
+| **toString**       | () =&gt; string                                                                                                                                                                | Returns a string representation of an array.                                                                                                                                                                                                |
+| **valueOf**        | () =&gt; <a href="#uint8array">Uint8Array</a>                                                                                                                                  | Returns the primitive value of the specified object.                                                                                                                                                                                        |
+
+
+#### ArrayLike
+
+| Prop         | Type                |
+| ------------ | ------------------- |
+| **`length`** | <code>number</code> |
+
+
+#### ArrayBufferTypes
+
+Allowed <a href="#arraybuffer">ArrayBuffer</a> types for the buffer of an ArrayBufferView and related Typed Arrays.
+
+| Prop              | Type                                                |
+| ----------------- | --------------------------------------------------- |
+| **`ArrayBuffer`** | <code><a href="#arraybuffer">ArrayBuffer</a></code> |
+
+
+#### ArrayBuffer
+
+Represents a raw buffer of binary data, which is used to store data for the
+different typed arrays. ArrayBuffers cannot be read from or written to directly,
+but can be passed to a typed array or DataView Object to interpret the raw
+buffer as needed.
+
+| Prop             | Type                | Description                                                                     |
+| ---------------- | ------------------- | ------------------------------------------------------------------------------- |
+| **`byteLength`** | <code>number</code> | Read-only. The length of the <a href="#arraybuffer">ArrayBuffer</a> (in bytes). |
+
+| Method    | Signature                                                                               | Description                                                     |
+| --------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| **slice** | (begin: number, end?: number \| undefined) =&gt; <a href="#arraybuffer">ArrayBuffer</a> | Returns a section of an <a href="#arraybuffer">ArrayBuffer</a>. |
+
+
+#### capWebStoreInfo
+
+| Prop                 | Type                               | Description                                                                                                     |
+| -------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **`tier`**           | <code>1 \| 2</code>                | 1 when databases are files in the Origin Private File System, 2 when they are whole-file images in IndexedDB    |
+| **`persistence`**    | <code>'opfs' \| 'indexeddb'</code> | Where the bytes rest                                                                                            |
+| **`sqliteVersion`**  | <code>string</code>                | The SQLite library version the engine reports                                                                   |
+| **`poolName`**       | <code>string</code>                | The VFS pool name. Part of the on-disk contract: changing it orphans stored databases.                          |
+| **`directory`**      | <code>string</code>                | The OPFS directory holding the pool                                                                             |
+| **`fallbackReason`** | <code>string</code>                | Why tier 2 was selected. Absent on tier 1.                                                                      |
+| **`quota`**          | <code>number</code>                | Origin storage quota in bytes. Absent where navigator.storage.estimate is not implemented, iOS 16.4 among them. |
+| **`usage`**          | <code>number</code>                | Origin storage usage in bytes. Absent under the same conditions as "quota".                                     |
+
+
 #### capEchoResult
 
 | Prop        | Type                | Description     |
@@ -782,5 +920,24 @@ This resembles calling addSQLiteSuffix and deleteOldDatabases, but it is more pe
 | Prop         | Type               | Description                                                                              |
 | ------------ | ------------------ | ---------------------------------------------------------------------------------------- |
 | **`values`** | <code>any[]</code> | the data values list as an Array iOS the first row is the returned ios_columns name list |
+
+
+### Type Aliases
+
+
+#### capSQLiteImportSource
+
+Anything `importDatabase` will read bytes from.
+
+A `ReadableStream` is read on demand and never buffered whole, which is what makes a large
+download affordable. A `Blob` is sliced as it goes, so a file-backed Blob is never fully
+realised. A <a href="#uint8array">`Uint8Array`</a> is already in memory and is handed over in chunks for uniformity.
+
+<code><a href="#uint8array">Uint8Array</a> | Blob | ReadableStream&lt;<a href="#uint8array">Uint8Array</a>&gt;</code>
+
+
+#### ArrayBufferLike
+
+<code>ArrayBufferTypes[keyof ArrayBufferTypes]</code>
 
 </docgen-api>
