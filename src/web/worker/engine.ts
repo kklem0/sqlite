@@ -15,10 +15,16 @@
 import { prefixed } from '../errors';
 import type { ExecResult } from '../protocol';
 
-import { producesRows, replaceUndefinedByNull } from './statements';
+import { producesRows, replaceUndefinedByNull, softDeleteRewrite } from './statements';
 
 export class Connection {
   private transactionActive = false;
+  /**
+   * Whether this database participates in the soft-delete protocol, cached because answering it
+   * means a PRAGMA per table. Invalidated whenever DDL runs, since that is the only thing that
+   * can add or remove the `last_modified` / `sql_deleted` pair.
+   */
+  private syncEnabledCache: boolean | null = null;
 
   constructor(
     readonly storage: string,
@@ -73,8 +79,25 @@ export class Connection {
     this.db.exec(`PRAGMA foreign_keys = ${enabled ? 'ON' : 'OFF'}`);
   }
 
+  /**
+   * Gate for the DELETE rewrite. The port source keys off the columns rather than the presence
+   * of `sync_table`, so a database gains soft-delete behaviour as soon as its schema declares
+   * the pair, which is also when `createSyncTable` will accept it.
+   */
+  get syncEnabled(): boolean {
+    if (this.syncEnabledCache === null) {
+      this.syncEnabledCache = hasSyncColumns(this);
+    }
+    return this.syncEnabledCache;
+  }
+
+  invalidateSyncCache(): void {
+    this.syncEnabledCache = null;
+  }
+
   /** A batch of raw statements, as `execute()` receives it. */
   executeBatch(statements: string): ExecResult {
+    this.invalidateSyncCache();
     const before = this.totalChanges();
     try {
       this.db.exec(statements);
@@ -84,8 +107,16 @@ export class Connection {
     return { changes: this.totalChanges() - before, lastId: this.lastInsertRowid() };
   }
 
-  /** One statement with its bind values. `wantRows` collects RETURNING / SELECT output. */
-  run(statement: string, values: any[] | undefined, wantRows: boolean): ExecResult {
+  /**
+   * One statement with its bind values. `wantRows` collects RETURNING / SELECT output.
+   *
+   * `rewriteDeletes` is the equivalent of the port source's `fromJson` flag. A DELETE the
+   * plugin generates itself must run as a real delete: `deleteExportedRows` exists precisely to
+   * reclaim soft-deleted rows, and a JSON import replicating a server-side deletion has already
+   * been told the row is gone. Rewriting those would make both operations no-ops.
+   */
+  run(rawStatement: string, values: any[] | undefined, wantRows: boolean, rewriteDeletes = true): ExecResult {
+    const statement = rewriteDeletes ? softDeleteRewrite(rawStatement, this.syncEnabled) : rawStatement;
     const bind = replaceUndefinedByNull(values);
     const before = this.totalChanges();
     let rows: any[] | undefined;
@@ -186,5 +217,23 @@ export class Connection {
 /** Statement-level helper shared by run/executeSet so both decide row collection identically. */
 export function wantsRows(statement: string, returnMode: string | undefined): boolean {
   if (returnMode === 'all' || returnMode === 'one') return producesRows(statement);
+  return false;
+}
+
+/**
+ * Local copy of the sync-column probe. It lives here rather than in `sync.ts` to avoid a
+ * circular import: `sync.ts` needs Connection, and Connection needs this answer.
+ */
+function hasSyncColumns(conn: Connection): boolean {
+  let lastModified = false;
+  let sqlDeleted = false;
+  for (const table of conn.tableList()) {
+    if (table === 'sync_table') continue;
+    for (const row of conn.query(`PRAGMA table_info(${table})`)) {
+      if (row.name === 'last_modified') lastModified = true;
+      if (row.name === 'sql_deleted') sqlDeleted = true;
+    }
+    if (lastModified && sqlDeleted) return true;
+  }
   return false;
 }

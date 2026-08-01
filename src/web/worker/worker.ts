@@ -19,6 +19,7 @@ import { exportJson } from './json/export';
 import { importJson } from './json/import';
 import { isJsonSQLite, parseJsonSQLite } from './json/validate';
 import { connKey, fromPoolPath, poolPath, reserveCapacity, storageName } from './paths';
+import * as sync from './sync';
 import { selectTier } from './tiers';
 import { runUpgrades } from './upgrades';
 
@@ -425,6 +426,34 @@ const ops: Record<string, (args: any) => any> = {
     const exported = exportJson(conn, database, jsonexportmode, progress);
     if (tier !== 1 && !conn.isReadonly) await images.put(conn.storage, conn.serialize());
     return { export: exported };
+  },
+
+  // ---------------------------------------------------------------- sync tables
+
+  async createSyncTable({ database }: { database: string }) {
+    const conn = connection(database, false);
+    const changes = sync.createSyncTable(conn);
+    conn.invalidateSyncCache();
+    await flushIfTier2(conn);
+    return { changes, lastId: -1 };
+  },
+
+  async setSyncDate({ database, syncdate }: { database: string; syncdate: string }) {
+    const conn = connection(database, false);
+    sync.setSyncDate(conn, syncdate);
+    await flushIfTier2(conn);
+    return {};
+  },
+
+  async getSyncDate({ database, readonly }: { database: string; readonly: boolean }) {
+    return { syncDate: sync.getSyncDate(connection(database, readonly)) };
+  },
+
+  async deleteExportedRows({ database }: { database: string }) {
+    const conn = connection(database, false);
+    sync.deleteExportedRows(conn);
+    await flushIfTier2(conn);
+    return {};
   },
 
   /**
