@@ -15,7 +15,14 @@
 import { prefixed } from '../errors';
 import type { ExecResult } from '../protocol';
 
-import { producesRows, replaceUndefinedByNull, softDeleteRewrite } from './statements';
+import {
+  extractTableName,
+  producesRows,
+  quoteIdent,
+  replaceUndefinedByNull,
+  softDeleteRewrite,
+  statementKind,
+} from './statements';
 
 export class Connection {
   private transactionActive = false;
@@ -25,6 +32,8 @@ export class Connection {
    * can add or remove the `last_modified` / `sql_deleted` pair.
    */
   private syncEnabledCache: boolean | null = null;
+  /** Per-table answer to "does a DELETE here get recorded", same invalidation again. */
+  private softDeleteCache = new Map<string, boolean>();
 
   constructor(
     readonly storage: string,
@@ -91,8 +100,35 @@ export class Connection {
     return this.syncEnabledCache;
   }
 
+  /**
+   * Whether a DELETE against this particular table should be recorded rather than performed.
+   *
+   * `syncEnabled` is a property of the database, because that is what the port source checks, but
+   * it cannot be the whole answer: a schema where one table is sync-tracked and another is not is
+   * legal, and rewriting a DELETE against the second produces `SET sql_deleted = 1` on a table
+   * with no such column. The port source has the same hole; here the target table has to carry
+   * the column too.
+   */
+  softDeletes(table: string | null): boolean {
+    if (!table || !this.syncEnabled) return false;
+    const key = table.toLowerCase();
+    let known = this.softDeleteCache.get(key);
+    if (known === undefined) {
+      try {
+        known = this.query(`PRAGMA table_info(${quoteIdent(table)})`).some((row: any) => row.name === 'sql_deleted');
+      } catch {
+        // A name this cannot resolve. Fall back to the database-wide answer, which is what this
+        // did before the gate existed, rather than failing a delete that used to work.
+        known = true;
+      }
+      this.softDeleteCache.set(key, known);
+    }
+    return known;
+  }
+
   invalidateSyncCache(): void {
     this.syncEnabledCache = null;
+    this.softDeleteCache.clear();
   }
 
   /** A batch of raw statements, as `execute()` receives it. */
@@ -116,7 +152,10 @@ export class Connection {
    * been told the row is gone. Rewriting those would make both operations no-ops.
    */
   run(rawStatement: string, values: any[] | undefined, wantRows: boolean, rewriteDeletes = true): ExecResult {
-    const statement = rewriteDeletes ? softDeleteRewrite(rawStatement, this.syncEnabled) : rawStatement;
+    const isDelete = rewriteDeletes && statementKind(rawStatement) === 'DELETE';
+    const statement = isDelete && this.softDeletes(extractTableName(rawStatement))
+      ? softDeleteRewrite(rawStatement, true)
+      : rawStatement;
     const bind = replaceUndefinedByNull(values);
     const before = this.totalChanges();
     let rows: any[] | undefined;
@@ -229,7 +268,7 @@ function hasSyncColumns(conn: Connection): boolean {
   let sqlDeleted = false;
   for (const table of conn.tableList()) {
     if (table === 'sync_table') continue;
-    for (const row of conn.query(`PRAGMA table_info(${table})`)) {
+    for (const row of conn.query(`PRAGMA table_info(${quoteIdent(table)})`)) {
       if (row.name === 'last_modified') lastModified = true;
       if (row.name === 'sql_deleted') sqlDeleted = true;
     }

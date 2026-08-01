@@ -12,6 +12,7 @@
  * is the last export date written by `exportToJson`.
  */
 import type { Connection } from './engine';
+import { quoteIdent } from './statements';
 
 export const SYNC_TABLE = 'sync_table';
 
@@ -19,7 +20,7 @@ export const SYNC_TABLE = 'sync_table';
 function anyTableHasColumn(conn: Connection, column: string): boolean {
   for (const table of conn.tableList()) {
     if (table === SYNC_TABLE) continue;
-    const rows = conn.query(`PRAGMA table_info(${table})`);
+    const rows = conn.query(`PRAGMA table_info(${quoteIdent(table)})`);
     if (rows.some((row: any) => row.name === column)) return true;
   }
   return false;
@@ -82,10 +83,15 @@ export function deleteExportedRows(conn: Connection): void {
 
   conn.withOptionalTransaction(true, () => {
     for (const table of tables) {
-      const columns = conn.query(`PRAGMA table_info(${table})`).map((row: any) => row.name);
+      const columns = conn.query(`PRAGMA table_info(${quoteIdent(table)})`).map((row: any) => row.name);
       if (!columns.includes('sql_deleted') || !columns.includes('last_modified')) continue;
       // Bypass the rewrite: reclaiming soft-deleted rows is the one place a real DELETE is meant.
-      conn.run(`DELETE FROM ${table} WHERE sql_deleted = 1 AND last_modified < ?`, [lastExportDate], false, false);
+      conn.run(
+        `DELETE FROM ${quoteIdent(table)} WHERE sql_deleted = 1 AND last_modified < ?`,
+        [lastExportDate],
+        false,
+        false,
+      );
     }
     return 0;
   });

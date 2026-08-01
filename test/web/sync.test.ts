@@ -26,7 +26,7 @@ describe('soft-delete rewrite (unit)', () => {
 
   test('rewrites a DELETE into a guarded UPDATE', () => {
     expect(softDeleteRewrite('DELETE FROM items WHERE id = 3;', true)).toBe(
-      'UPDATE items SET sql_deleted = 1 WHERE id = 3 AND sql_deleted = 0;',
+      'UPDATE items SET sql_deleted = 1 WHERE (id = 3) AND sql_deleted = 0;',
     );
   });
 
@@ -44,6 +44,48 @@ describe('soft-delete rewrite (unit)', () => {
     expect(extractTableName("DELETE FROM items WHERE name = 'DELETE FROM other'")).toBe('items');
     // The literal is blanked before matching, so ORDER BY still terminates the clause.
     expect(extractWhereClause('DELETE FROM items WHERE id = 4 ORDER BY id')).toBe('id = 4');
+  });
+
+  test('the clause keeps its literals, and a WHERE inside one is not mistaken for the real one', () => {
+    // Blanking the literal to find the keyword is right; returning the blanked text is not. This
+    // used to yield "name =", which rewrites to SQL that does not parse.
+    expect(extractWhereClause("DELETE FROM items WHERE name = 'bob'")).toBe("name = 'bob'");
+    expect(softDeleteRewrite("DELETE FROM items WHERE name = 'bob';", true)).toBe(
+      "UPDATE items SET sql_deleted = 1 WHERE (name = 'bob') AND sql_deleted = 0;",
+    );
+    // A literal containing the keyword must not become the clause.
+    expect(extractWhereClause("DELETE FROM items WHERE note = 'WHERE id = 1' AND id = 2")).toBe(
+      "note = 'WHERE id = 1' AND id = 2",
+    );
+    // Comments are blanked in place, so what follows them is still found at the right offset.
+    expect(extractWhereClause('DELETE FROM items /* drop it */ WHERE id = 7')).toBe('id = 7');
+  });
+
+  test('a quoted table name is the table, not the next keyword', () => {
+    // stripNoise blanks double-quoted identifiers along with string literals, so a greedy match
+    // over the blanked copy read straight past the name: this returned "WHERE", the rewrite
+    // targeted a table of that name, and the soft delete silently became a real one.
+    expect(extractTableName('DELETE FROM "order" WHERE id = ?')).toBe('"order"');
+    expect(extractTableName('DELETE FROM [order] WHERE id = ?')).toBe('[order]');
+    expect(extractTableName('DELETE  FROM   items   WHERE id = ?')).toBe('items');
+    expect(softDeleteRewrite('DELETE FROM "order" WHERE id = ?', true)).toBe(
+      'UPDATE "order" SET sql_deleted = 1 WHERE (id = ?) AND sql_deleted = 0;',
+    );
+  });
+
+  test('the clause is bracketed, because AND binds tighter than OR', () => {
+    // Unbracketed, this reads as `id = 1 OR (id = 2 AND sql_deleted = 0)`: the guard covers only
+    // the last disjunct, so a repeated delete marks row 1 again and bumps its last_modified.
+    expect(softDeleteRewrite('DELETE FROM items WHERE id = 1 OR id = 2', true)).toBe(
+      'UPDATE items SET sql_deleted = 1 WHERE (id = 1 OR id = 2) AND sql_deleted = 0;',
+    );
+  });
+
+  test('RETURNING survives the rewrite instead of ending up inside the WHERE clause', () => {
+    expect(extractWhereClause('DELETE FROM items WHERE id = 1 RETURNING *')).toBe('id = 1');
+    expect(softDeleteRewrite('DELETE FROM items WHERE id = 1 RETURNING *', true)).toBe(
+      'UPDATE items SET sql_deleted = 1 WHERE (id = 1) AND sql_deleted = 0 RETURNING *;',
+    );
   });
 });
 

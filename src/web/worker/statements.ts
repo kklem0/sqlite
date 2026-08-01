@@ -102,31 +102,54 @@ function matchesKeyword(sql: string, i: number, keyword: string): boolean {
   return after === undefined || !/[A-Za-z0-9_]/.test(after);
 }
 
-/** Remove string literals and comments so keyword matching cannot be fooled by data. */
+/**
+ * Blank out string literals and comments so keyword matching cannot be fooled by data.
+ *
+ * Length preserving, deliberately: every blanked run becomes the same number of spaces, so an
+ * offset into the result is an offset into the original. `extractWhereClause` depends on that to
+ * hand back a clause with its literals intact. Collapsing each run to one space instead, which is
+ * what this did originally, silently deleted them.
+ */
 export function stripNoise(sql: string): string {
   let out = '';
+  const blank = (from: number, to: number) => ' '.repeat(to - from);
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
     if (ch === "'" || ch === '"' || ch === '`') {
-      i = scanQuoted(sql, i, ch) - 1;
-      out += ' ';
+      const end = scanQuoted(sql, i, ch);
+      out += blank(i, end);
+      i = end - 1;
       continue;
     }
     if (ch === '-' && sql[i + 1] === '-') {
       const nl = sql.indexOf('\n', i);
-      i = (nl === -1 ? sql.length : nl) - 1;
-      out += ' ';
+      const end = nl === -1 ? sql.length : nl;
+      out += blank(i, end);
+      i = end - 1;
       continue;
     }
     if (ch === '/' && sql[i + 1] === '*') {
-      const end = sql.indexOf('*/', i + 2);
-      i = (end === -1 ? sql.length : end + 2) - 1;
-      out += ' ';
+      const found = sql.indexOf('*/', i + 2);
+      const end = found === -1 ? sql.length : found + 2;
+      out += blank(i, end);
+      i = end - 1;
       continue;
     }
     out += ch;
   }
   return out;
+}
+
+/**
+ * A table or column name, quoted for interpolation into SQL.
+ *
+ * `tableList()` and `PRAGMA foreign_key_list` return bare names, and a schema is free to contain
+ * a table called `order` or `group`. Interpolating one of those unquoted turns an internal PRAGMA
+ * into a syntax error, which is how a reserved-word table used to switch the whole soft-delete
+ * protocol off for a database.
+ */
+export function quoteIdent(name: string): string {
+  return `"${String(name).replace(/"/g, '""')}"`;
 }
 
 /** The leading keyword, upper-cased: SELECT, INSERT, UPDATE, DELETE, CREATE, PRAGMA, ... */
@@ -172,13 +195,47 @@ export function replaceUndefinedByNull(values: any[] | undefined): any[] {
  * already-soft-deleted row reports zero changes rather than touching `last_modified` again.
  */
 export function extractTableName(statement: string): string | null {
-  const match = stripNoise(statement).match(/(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([^\s;(]+)/i);
-  return match?.[1] ?? null;
+  const stripped = stripNoise(statement);
+  // The keyword is located in the blanked copy so a table name inside a literal cannot be picked
+  // up, but the name itself is read from the original. `stripNoise` blanks double-quoted
+  // identifiers along with strings, and a greedy `\s+` after the keyword would swallow the blanks
+  // where the name used to be: that is how `DELETE FROM "order" WHERE id = ?` yielded the table
+  // name `WHERE`, and a soft delete against a quoted table silently became a real one.
+  const match = stripped.match(/(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i);
+  if (!match || match.index === undefined) return null;
+  const after = statement.slice(match.index + match[0].length);
+  const lead = after.match(/^\s*/)?.[0].length ?? 0;
+  const token = after.slice(lead).match(/^(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|[^\s;(]+)/);
+  return token ? token[0] : null;
 }
 
+/**
+ * The WHERE clause as the caller wrote it, literals and all.
+ *
+ * The keyword hunt runs over the blanked copy so a `WHERE` inside a string cannot be mistaken for
+ * the real one, but the clause itself is sliced out of the original: returning the blanked text
+ * would drop every literal, and `DELETE FROM t WHERE name = 'bob'` would rewrite to
+ * `... WHERE name = AND sql_deleted = 0`, which is not valid SQL.
+ */
 export function extractWhereClause(statement: string): string | null {
-  const match = stripNoise(statement).match(/WHERE\s(.+?)(?:ORDER\s+BY|LIMIT|$)/is);
-  return match?.[1] ? match[1].trim() : null;
+  const stripped = stripNoise(statement);
+  const match = stripped.match(/WHERE\s(.+?)(?:ORDER\s+BY|LIMIT|RETURNING|$)/is);
+  if (!match || match.index === undefined || !match[1]) return null;
+  const start = match.index + 'WHERE'.length + 1;
+  return statement.slice(start, start + match[1].length).trim();
+}
+
+/**
+ * The trailing `RETURNING ...`, if any. sqlite-wasm can step a RETURNING statement directly, so
+ * the clause is carried across the rewrite rather than dropped: a soft delete that was asked for
+ * its rows should still hand them back, and appending the guard after it would not even parse.
+ */
+export function extractReturningClause(statement: string): string | null {
+  const stripped = stripNoise(statement);
+  const match = stripped.match(/\bRETURNING\b/i);
+  if (!match || match.index === undefined) return null;
+  const clause = statement.slice(match.index).trim();
+  return clause.endsWith(';') ? clause.slice(0, -1).trim() : clause;
 }
 
 /**
@@ -195,5 +252,10 @@ export function softDeleteRewrite(statement: string, syncEnabled: boolean): stri
   if (!whereClause) throw new Error('deleteSQL: cannot find a WHERE clause');
 
   const where = whereClause.endsWith(';') ? whereClause.slice(0, -1) : whereClause;
-  return `UPDATE ${tableName} SET sql_deleted = 1 WHERE ${where} AND sql_deleted = 0;`;
+  const returning = extractReturningClause(statement);
+  const suffix = returning ? ` ${returning}` : '';
+  // The caller's clause is parenthesised because AND binds tighter than OR: without the brackets,
+  // `WHERE a = 1 OR b = 2` becomes `a = 1 OR (b = 2 AND sql_deleted = 0)`, so the guard covers
+  // only the last disjunct and an already-deleted row is marked again on every repeat.
+  return `UPDATE ${tableName} SET sql_deleted = 1 WHERE (${where}) AND sql_deleted = 0${suffix};`;
 }

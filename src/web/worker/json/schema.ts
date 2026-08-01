@@ -10,6 +10,7 @@
  */
 import type { JsonSQLite, JsonTable, JsonView } from '../../../definitions';
 import type { Connection } from '../engine';
+import { quoteIdent } from '../statements';
 
 export function createSchemaStatements(jsonData: JsonSQLite): string[] {
   const statements: string[] = [];
@@ -81,7 +82,7 @@ export function createViews(conn: Connection, views: JsonView[]): number {
 
 /** Column names and declared types for a table, as PRAGMA table_info reports them. */
 export function tableColumnNamesTypes(conn: Connection, table: string): { names: string[]; types: string[] } {
-  const rows = conn.query(`PRAGMA table_info(${table})`);
+  const rows = conn.query(`PRAGMA table_info(${quoteIdent(table)})`);
   return {
     names: rows.map((row: any) => row.name),
     types: rows.map((row: any) => row.type),
