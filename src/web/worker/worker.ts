@@ -143,13 +143,18 @@ function connectionsFor(database: string): Connection[] {
 }
 
 function openRaw(storage: string, readonly: boolean): Connection {
-  if (tier === 1) {
-    const db = new poolUtil.OpfsSAHPoolDb(storage, readonly ? 'r' : 'cw');
-    return new Connection(storage, readonly, db, sqlite3);
-  }
-  // Tier 2 always opens writable: sqlite3_deserialize needs it. Read-only is applied after the
-  // image is loaded, with PRAGMA query_only.
-  return new Connection(storage, readonly, new sqlite3.oo1.DB(':memory:', 'c'), sqlite3);
+  const conn =
+    tier === 1
+      ? new Connection(storage, readonly, new poolUtil.OpfsSAHPoolDb(storage, readonly ? 'r' : 'cw'), sqlite3)
+      : // Tier 2 always opens writable: sqlite3_deserialize needs it. Read-only is applied after
+        // the image is loaded, with PRAGMA query_only.
+        new Connection(storage, readonly, new sqlite3.oo1.DB(':memory:', 'c'), sqlite3);
+  // sqlite defaults foreign keys OFF, per connection. Every other platform of this plugin turns
+  // them on at open (electron `utilsSQLite.ts:63`, jeep `Database.open`), and the soft-delete
+  // cascade relies on the schema's declared actions being real, so web does the same. The upgrade
+  // and JSON-import paths that need them off already toggle them explicitly.
+  conn.setForeignKeyConstraintsEnabled(true);
+  return conn;
 }
 
 async function openTier2(storage: string, readonly: boolean): Promise<Connection> {
