@@ -123,6 +123,13 @@ export interface WorkerEvent {
   data: any;
 }
 
+/**
+ * Progress for `importDatabase`. Additive, and separate from `sqliteImportProgressEvent` on
+ * purpose: that one carries free-text progress for the JSON import, and conflating two unrelated
+ * operations on one event would make both harder to listen to (PLAN 16.2).
+ */
+export const EV_IMPORT_DATABASE_PROGRESS = 'sqliteImportDatabaseProgressEvent';
+
 /** The five events the web implementation has always emitted (PLAN 2.4). */
 export const EV_IMPORT_PROGRESS = 'sqliteImportProgressEvent';
 export const EV_EXPORT_PROGRESS = 'sqliteExportProgressEvent';
