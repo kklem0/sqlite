@@ -7,6 +7,15 @@ All notable changes to this project will be documented in this file. See [commit
 Entries below this heading exist only on the fork's release branch. Upstream releases and their
 generated entries continue underneath, unchanged, and the fork tracks them.
 
+### 8.2.0-sssf.2 (2026-08-02)
+
+Fixes found by running 8.2.0-sssf.1 on a physical iPhone and inside a real Vite consumer app.
+No API changes.
+
+* **web:** a resume that arrives before its own pause has finished no longer leaves the store closed. iOS suspends the page inside `pauseWebStore`'s worker round trip and delivers the foreground signal first, so the resume found nothing recorded, returned, and the pause then closed every connection with nothing left to reopen them: every query failed with `Database X is not open` until the app was backgrounded and restored a second time. Two of three real background cycles on an iPhone 16 Pro hit it, including one of only 30 seconds
+* **web:** a worker URL that 404s is no longer reported as an unsupported browser. The server answers such a request with the application's HTML, the browser reports `Unexpected token '<'`, and the error now says so and names `setSqliteWorkerFactory()` instead of claiming the browser is below Chrome 80
+* **docs:** the worker and wasm are no longer documented as resolving without help under Vite, which they do not. Serving both from the web root is documented as the path that always works
+
 ### 8.2.0-sssf.1 (2026-08-01)
 
 First fork release. Contents are upstream 8.1.0 plus the unreleased 8.2.0 work below: the web

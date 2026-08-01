@@ -1,6 +1,6 @@
 {
   "name": "sssf-capacitor-sqlite",
-  "version": "8.2.0-sssf.1",
+  "version": "8.2.0-sssf.2",
   "description": "Community plugin for native & electron SQLite databases",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
