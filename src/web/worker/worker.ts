@@ -564,16 +564,28 @@ const ops: Record<string, (args: any) => any> = {
    */
   async pause() {
     requireInit();
-    if (tier !== 1) return { paused: false, reopen: [] };
+    if (tier !== 1) return { paused: false, reopen: [], interrupted: [] };
     const reopen: { database: string; readonly: boolean }[] = [];
+    // A transaction cannot survive the close, so it is rolled back and named. Reporting it is the
+    // honest option (PLAN 6.7): the caller that opened it will never hear about it otherwise.
+    const interrupted: string[] = [];
     for (const [key, conn] of connections) {
+      const database = key.substring(3);
+      if (conn.isTransactionActive) {
+        interrupted.push(database);
+        try {
+          conn.rollbackTransaction();
+        } catch {
+          // Closing the connection discards it either way.
+        }
+      }
       await flushIfTier2(conn);
       conn.close();
-      reopen.push({ database: key.substring(3), readonly: conn.isReadonly });
+      reopen.push({ database, readonly: conn.isReadonly });
     }
     connections.clear();
     poolUtil.pauseVfs();
-    return { paused: poolUtil.isPaused(), reopen };
+    return { paused: poolUtil.isPaused(), reopen, interrupted };
   },
 
   async unpause() {
