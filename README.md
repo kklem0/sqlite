@@ -1,3 +1,28 @@
+> ## This is a fork: `sssf-capacitor-sqlite`
+>
+> A fork of [`@capacitor-community/sqlite`](https://github.com/capacitor-community/sqlite) whose
+> **Web implementation has been rewritten**. Native (iOS, Android) and Electron are untouched and
+> track upstream exactly.
+>
+> **What changed.** The web engine was `jeep-sqlite`, a Stencil element wrapping `sql.js` in
+> memory with whole-database images in IndexedDB, last published in August 2024. This fork
+> replaces it with the official [`@sqlite.org/sqlite-wasm`](https://github.com/sqlite/sqlite-wasm)
+> build running in a dedicated worker, storing databases as real files in the Origin Private File
+> System through the `opfs-sahpool` VFS, with an automatic IndexedDB fallback for browsers that
+> lack OPFS sync access handles. Existing `jeep-sqlite` data is migrated once, automatically. It
+> ships with a browser test suite that runs every contract test on both storage tiers.
+>
+> **Why a fork exists at all.** The work is offered upstream, and the fork is meant to be retired
+> rather than maintained: see the upstream discussion at <!-- UPSTREAM_ISSUE -->`#<issue>`<!-- /UPSTREAM_ISSUE -->.
+> **Switch back to `@capacitor-community/sqlite` as soon as upstream merges it.** Nothing in the
+> public API differs, so switching back is a dependency change and a reinstall.
+>
+> **Never install this alongside `@capacitor-community/sqlite` in one app.** The iOS pod and the
+> Android Gradle module keep their upstream identities, so two copies collide at the native build
+> level rather than failing cleanly. Remove one before adding the other.
+>
+> Upstream README follows unchanged.
+
 <p align="center"><br><img src="https://user-images.githubusercontent.com/236501/85893648-1c92e880-b7a8-11ea-926d-95355b8175c7.png" width="128" height="128" /></p>
 <h3 align="center">SQLITE DATABASE</h3>
 <p align="center"><strong><code>@capacitor-community/sqlite</code></strong></p>
