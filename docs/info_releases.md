@@ -1,4 +1,78 @@
-## CAPACITOR 4 (Master)
+## CAPACITOR 8 (Master)
+
+🚨 Release 8.2.0 web only ->> 🚨
+
+  iOS, Android and Electron are unchanged in this release. Everything below concerns the Web
+  platform only.
+
+  The Web plugin is now implemented on `@sqlite.org/sqlite-wasm`, the official SQLite wasm build,
+  running in a dedicated Worker that ships with the plugin. It replaces `jeep-sqlite`, `sql.js`
+  and `localforage`, which are no longer dependencies of anything here.
+
+  There are two durability tiers, chosen automatically by `initWebStore()`:
+
+   - tier 1, databases are real files in the browser's `Origin Private File System` through the
+     `opfs-sahpool` VFS. No COOP/COEP headers and no `SharedArrayBuffer` are required, so it works
+     inside Capacitor WebViews and on ordinary hosting. Every committed write is durable.
+   - tier 2, the automatic fallback for browsers without OPFS sync access handles: databases are
+     opened `:memory:` and their whole-file image is written to IndexedDB, which is the model
+     jeep-sqlite used everywhere.
+
+  `initWebStore` is still `MANDATORY` and is still called exactly as before. What must go is the
+  element bootstrap that used to surround it, first documented in release 3.2.3-1 below. Replace
+
+  ```js
+  if(platform === "web") {
+    await customElements.whenDefined('jeep-sqlite');
+    const jeepSqliteEl = document.querySelector('jeep-sqlite');
+    if(jeepSqliteEl != null) {
+      await sqlite.initWebStore();
+    }
+  }
+  ```
+
+  with
+
+  ```js
+  if(platform === "web") {
+    await sqlite.initWebStore();
+  }
+  ```
+
+  and delete the `jeep-sqlite` dependency, the `defineCustomElements`/`applyPolyfills` import, the
+  `<jeep-sqlite>` element from your templates and any script that copied `sql-wasm.wasm` into your
+  assets folder. The worker and `sqlite3.wasm` ship inside the package.
+
+  `saveToStore` is also restated: it is a no-op on tier 1, where the data is already on disk, and
+  the real flush of the database image to IndexedDB on tier 2. Calling it after a batch of writes
+  remains the portable pattern. The `<jeep-sqlite>` `autosave` attribute is gone with the element.
+
+  Existing data is migrated for you. The first `initWebStore()` after upgrading reads the old
+  `jeepSqliteStore` IndexedDB store, imports every database into the active tier, verifies each
+  one with `PRAGMA integrity_check`, and only then retires the legacy store. If anything fails,
+  nothing is deleted and a warning naming the database is written to the console.
+
+  Three behaviour changes worth knowing:
+
+   - Read-only connections (`readonly: true`) now work on Web.
+   - Integers above 2^53 come back as `BigInt` rather than a silently truncated number.
+     `JSON.stringify` throws on those; `exportToJson` writes them as decimal strings.
+   - A failed upgrade now restores the pre-upgrade database and rejects, instead of handing back
+     a working connection at the old version with no signal that the migration failed.
+
+  Two new limits, both loud rather than silent:
+
+   - Minimum browser versions are Chrome/Android WebView 80, Safari 14, Firefox 74. Below that the
+     plugin does not load at all.
+   - Only one tab per origin may own the store; a second tab gets an explicit error.
+
+  Encryption is still not supported on Web.
+
+  See [Web Usage](https://github.com/capacitor-community/sqlite/blob/master/docs/Web-Usage.md).
+
+🚨 Release 8.2.0 <<- 🚨
+
+## CAPACITOR 4
 
 🚨 Release 4.0.1 all platforms ->> 🚨
 
