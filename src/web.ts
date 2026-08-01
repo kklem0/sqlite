@@ -37,10 +37,12 @@ import type {
   capSQLiteExtensionEnable,
 } from './definitions';
 import { WorkerClient } from './web/client';
-import { WEBSTORE_NOT_OPEN, prefixed } from './web/errors';
+import { WEBSTORE_NOT_OPEN, messageOf, prefixed } from './web/errors';
+import { connectionNameFromFile, getLocalDiskAdapter } from './web/localdisk';
 import type { SerializedUpgrade, Tier, WorkerInitResult } from './web/protocol';
+import { EV_PICK_DATABASE_ENDED, EV_SAVE_TO_DISK, EV_HTTP_REQUEST_ENDED } from './web/protocol';
 import { ConnectionRegistry, parseKey, reconcile } from './web/registry';
-import { connKey } from './web/worker/paths';
+import { connKey, storageName } from './web/worker/paths';
 import { getSqliteWebOptions } from './web/worker-factory';
 
 /**
@@ -348,7 +350,7 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   }
 
   ////////////////////////////////////
-  ////// JSON PIPELINE AND SYNC TABLES
+  ////// JSON, SYNC, ASSETS AND LOCAL DISK
   ////////////////////////////////////
 
   async isJsonValid(options: capSQLiteImportOptions): Promise<capSQLiteResult> {
@@ -406,25 +408,59 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   }
 
   async copyFromAssets(options: capSQLiteFromAssetsOptions): Promise<void> {
-    console.log('copyFromAssets', options);
-    throw this.unimplemented('Not implemented on web.');
+    const overwrite = options?.overwrite ?? true;
+    await this.call('copyFromAssets', { base: this.assetsBase(), overwrite });
   }
 
   async getFromHTTPRequest(options: capSQLiteHTTPOptions): Promise<void> {
-    console.log('getFromHTTPRequest', options);
-    throw this.unimplemented('Not implemented on web.');
+    const url = CapacitorSQLiteWeb.optionValue<string>(options, 'url');
+    const overwrite = options.overwrite ?? true;
+    try {
+      await this.call('getFromHTTPRequest', { url, overwrite });
+      this.notifyListeners(EV_HTTP_REQUEST_ENDED, { message: 'ended' });
+    } catch (err) {
+      this.notifyListeners(EV_HTTP_REQUEST_ENDED, { message: `Error: ${messageOf(err)}` });
+      throw prefixed('GetFromHTTPRequest', err);
+    }
   }
 
   async getFromLocalDiskToStore(options: capSQLiteLocalDiskOptions): Promise<void> {
-    console.log('getFromLocalDiskToStore', options);
-    throw this.unimplemented('Not implemented on web.');
+    this.ensureStore();
+    const overwrite = options?.overwrite ?? true;
+    try {
+      const picked = await getLocalDiskAdapter().pickDatabase();
+      if (!picked) {
+        this.notifyListeners(EV_PICK_DATABASE_ENDED, { message: 'User cancelled' });
+        return;
+      }
+      const database = connectionNameFromFile(picked.name);
+      const result = await this.call('adoptImage', { database, bytes: picked.bytes, overwrite });
+      this.notifyListeners(EV_PICK_DATABASE_ENDED, { db_name: result.storage, message: 'ended' });
+    } catch (err) {
+      this.notifyListeners(EV_PICK_DATABASE_ENDED, { message: `Error: ${messageOf(err)}` });
+      throw prefixed('GetFromLocalDiskToStore', err);
+    }
   }
 
   async saveToLocalDisk(options: capSQLiteOptions): Promise<void> {
-    console.log('saveToLocalDisk', options);
-    throw this.unimplemented('Not implemented on web.');
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    try {
+      const { bytes } = await this.call('exportDb', { database }, database, false);
+      const fileName = storageName(database);
+      await getLocalDiskAdapter().saveDatabase(fileName, bytes);
+      this.notifyListeners(EV_SAVE_TO_DISK, { db_name: fileName, message: 'ended' });
+    } catch (err) {
+      this.notifyListeners(EV_SAVE_TO_DISK, { message: `Error: ${messageOf(err)}` });
+      throw prefixed('SaveToLocalDisk', err);
+    }
   }
 
+  /** Where copyFromAssets looks for `databases.json`, overridable through setSqliteWebOptions. */
+  private assetsBase(): string {
+    const configured = getSqliteWebOptions().assetsPath;
+    const base = typeof document !== 'undefined' ? document.baseURI : self.location.href;
+    return new URL(configured ?? 'assets/databases/', base).href;
+  }
 
   ////////////////////////////////////
   ////// UNIMPLEMENTED METHODS

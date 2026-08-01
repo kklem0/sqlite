@@ -13,6 +13,8 @@ import { toErrorPayload } from '../errors';
 import type { ExecResult, OpenArgs, WorkerInitArgs, WorkerInitResult, WorkerRequest } from '../protocol';
 import { BOOT_ID, EVENT_ID, EV_EXPORT_PROGRESS, EV_IMPORT_PROGRESS } from '../protocol';
 
+import type { AssetTarget } from './assets';
+import { copyFromAssets, getFromHTTPRequest } from './assets';
 import { Connection, wantsRows } from './engine';
 import { ImageStore, deserializeInto } from './images';
 import { exportJson } from './json/export';
@@ -49,6 +51,28 @@ function requireInit(): void {
 /** Raise a plugin event. The facade forwards these to notifyListeners. */
 function raise(event: string, data: any): void {
   self.postMessage({ id: EVENT_ID, event, data });
+}
+
+/**
+ * Where copyFromAssets and getFromHTTPRequest put what they fetch, abstracted so the same code
+ * serves the pool on tier 1 and the image store on tier 2.
+ */
+function assetTarget(): AssetTarget {
+  return {
+    poolUtil: tier === 1 ? poolUtil : null,
+    exists: async (storage: string) => {
+      if (tier === 1) return (poolUtil.getFileNames() as string[]).includes(poolPath(storage));
+      return images.has(storage);
+    },
+    adopt: async (storage: string, bytes: Uint8Array) => {
+      if (tier === 1) {
+        await reserveCapacity(poolUtil, 2);
+        poolUtil.importDb(poolPath(storage), bytes);
+      } else {
+        await images.put(storage, bytes);
+      }
+    },
+  };
 }
 
 /**
@@ -454,6 +478,33 @@ const ops: Record<string, (args: any) => any> = {
     sync.deleteExportedRows(conn);
     await flushIfTier2(conn);
     return {};
+  },
+
+  // ---------------------------------------------------------------- assets and downloads
+
+  async copyFromAssets({ base, overwrite }: { base: string; overwrite: boolean }) {
+    requireInit();
+    return copyFromAssets(assetTarget(), base, overwrite);
+  },
+
+  async getFromHTTPRequest({ url, overwrite }: { url: string; overwrite: boolean }) {
+    requireInit();
+    const storage = await getFromHTTPRequest(assetTarget(), url, overwrite);
+    return { storage };
+  },
+
+  /** Adopt a whole image the main thread produced, used by getFromLocalDiskToStore. */
+  async adoptImage({ database, bytes, overwrite }: { database: string; bytes: Uint8Array; overwrite: boolean }) {
+    requireInit();
+    const storage = storageName(database);
+    const target = assetTarget();
+    if (!overwrite && (await target.exists(storage))) return { adopted: false, storage };
+    for (const conn of connectionsFor(database)) {
+      conn.close();
+      connections.delete(connKey(database, conn.isReadonly));
+    }
+    await target.adopt(storage, bytes);
+    return { adopted: true, storage };
   },
 
   /**
