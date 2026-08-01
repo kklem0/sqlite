@@ -10,7 +10,7 @@
  * - Errors come back as a payload and are rebuilt into a real Error here, instead of the
  *   `throw new Error(\`${err}\`)` stringification the jeep facade used.
  */
-import { fromErrorPayload } from './errors';
+import { fromErrorPayload, workerLoadFailure } from './errors';
 import type { WorkerEvent, WorkerResponse } from './protocol';
 import { BOOT_ID, EVENT_ID } from './protocol';
 import { createSqliteWorker } from './worker-factory';
@@ -58,10 +58,7 @@ export class WorkerClient {
         else entry.reject(fromErrorPayload(message.error));
       };
       worker.onerror = (event) => {
-        const error = new Error(
-          `The SQLite worker failed to load (${(event as ErrorEvent).message || 'unknown error'}). ` +
-            'If your bundler cannot resolve the shipped worker, provide one with setSqliteWorkerFactory().',
-        );
+        const error = workerLoadFailure((event as ErrorEvent).message ?? '');
         reject(error);
         this.failAll(error);
       };
