@@ -9,7 +9,7 @@
  *
  * Raw IndexedDB on purpose: localforage is not a dependency and will not become one.
  */
-import { IMAGE_STORE_DB, IMAGE_STORE_NAME } from '../protocol';
+import { IMAGE_STORE_NAME, imageStoreDbName } from '../protocol';
 
 function request<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -20,11 +20,17 @@ function request<T>(req: IDBRequest<T>): Promise<T> {
 
 export class ImageStore {
   private dbPromise: Promise<IDBDatabase> | null = null;
+  private name: string;
+
+  constructor(poolName: string) {
+    this.name = imageStoreDbName(poolName);
+  }
 
   private open(): Promise<IDBDatabase> {
     if (!this.dbPromise) {
+      const name = this.name;
       this.dbPromise = new Promise((resolve, reject) => {
-        const req = indexedDB.open(IMAGE_STORE_DB, 1);
+        const req = indexedDB.open(name, 1);
         req.onupgradeneeded = () => {
           if (!req.result.objectStoreNames.contains(IMAGE_STORE_NAME)) {
             req.result.createObjectStore(IMAGE_STORE_NAME);
