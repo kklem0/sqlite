@@ -15,14 +15,22 @@
 import { prefixed } from '../errors';
 import type { ExecResult } from '../protocol';
 
+import type { ForeignKey } from './cascade';
+import { cascadeSoftDelete, foreignKeys, resolveTableName } from './cascade';
 import {
   extractTableName,
+  extractWhereClause,
   producesRows,
-  quoteIdent,
   replaceUndefinedByNull,
+  quoteIdent,
   softDeleteRewrite,
+  splitStatements,
   statementKind,
+  stripNoise,
 } from './statements';
+
+/** Statement kinds that can change the schema, and therefore every cached answer about it. */
+const DDL = new Set(['CREATE', 'DROP', 'ALTER']);
 
 export class Connection {
   private transactionActive = false;
@@ -32,6 +40,8 @@ export class Connection {
    * can add or remove the `last_modified` / `sql_deleted` pair.
    */
   private syncEnabledCache: boolean | null = null;
+  /** The foreign-key graph, cached for the same reason and invalidated at the same points. */
+  private foreignKeyCache: ForeignKey[] | null = null;
   /** Per-table answer to "does a DELETE here get recorded", same invalidation again. */
   private softDeleteCache = new Map<string, boolean>();
 
@@ -100,6 +110,12 @@ export class Connection {
     return this.syncEnabledCache;
   }
 
+  /** Every foreign key in the database, for the soft-delete cascade. Same caching as syncEnabled. */
+  get foreignKeyGraph(): ForeignKey[] {
+    if (this.foreignKeyCache === null) this.foreignKeyCache = foreignKeys(this);
+    return this.foreignKeyCache;
+  }
+
   /**
    * Whether a DELETE against this particular table should be recorded rather than performed.
    *
@@ -115,7 +131,9 @@ export class Connection {
     let known = this.softDeleteCache.get(key);
     if (known === undefined) {
       try {
-        known = this.query(`PRAGMA table_info(${quoteIdent(table)})`).some((row: any) => row.name === 'sql_deleted');
+        // The name arrives as the caller wrote it, which may already be quoted or qualified.
+        const bare = resolveTableName(table);
+        known = this.query(`PRAGMA table_info(${quoteIdent(bare)})`).some((row: any) => row.name === 'sql_deleted');
       } catch {
         // A name this cannot resolve. Fall back to the database-wide answer, which is what this
         // did before the gate existed, rather than failing a delete that used to work.
@@ -128,15 +146,36 @@ export class Connection {
 
   invalidateSyncCache(): void {
     this.syncEnabledCache = null;
+    this.foreignKeyCache = null;
     this.softDeleteCache.clear();
   }
 
-  /** A batch of raw statements, as `execute()` receives it. */
+  /**
+   * A batch of raw statements, as `execute()` receives it.
+   *
+   * A DELETE in a batch is soft-deleted exactly as one passed to `run` would be. The port source
+   * does this too (`utilsSQLite.statementsToSQL92` routes every DELETE through `deleteSQL`), and
+   * without it `execute('DELETE FROM t WHERE ...')` physically removes rows from a sync-tracked
+   * database while `run` of the same statement records them, so which entry point the app happened
+   * to use decides whether the server ever hears about the deletion.
+   *
+   * The batch is only split when it needs to be. Handing the whole string to sqlite in one call is
+   * both faster and less exposed to the splitter, so that stays the path for everything else.
+   */
   executeBatch(statements: string): ExecResult {
     this.invalidateSyncCache();
     const before = this.totalChanges();
     try {
-      this.db.exec(statements);
+      // Cheap test first: `syncEnabled` costs a PRAGMA per table, and the overwhelming majority
+      // of batches are schema and inserts with no DELETE in them at all.
+      if (/\bDELETE\b/i.test(stripNoise(statements)) && this.syncEnabled) {
+        for (const statement of splitStatements(statements)) {
+          if (statementKind(statement) === 'DELETE') this.run(statement, [], false);
+          else this.db.exec(statement);
+        }
+      } else {
+        this.db.exec(statements);
+      }
     } catch (err) {
       throw prefixed('Execute', err);
     }
@@ -152,27 +191,51 @@ export class Connection {
    * been told the row is gone. Rewriting those would make both operations no-ops.
    */
   run(rawStatement: string, values: any[] | undefined, wantRows: boolean, rewriteDeletes = true): ExecResult {
-    const isDelete = rewriteDeletes && statementKind(rawStatement) === 'DELETE';
-    const statement = isDelete && this.softDeletes(extractTableName(rawStatement))
-      ? softDeleteRewrite(rawStatement, true)
-      : rawStatement;
     const bind = replaceUndefinedByNull(values);
+    const isDelete = rewriteDeletes && statementKind(rawStatement) === 'DELETE';
+    const table = isDelete ? extractTableName(rawStatement) : null;
+    const soft = isDelete && this.softDeletes(table);
+    const statement = soft ? softDeleteRewrite(rawStatement, true) : rawStatement;
+
     const before = this.totalChanges();
-    let rows: any[] | undefined;
-    try {
-      if (wantRows) {
-        rows = this.db.exec({
-          sql: statement,
-          bind: bind.length > 0 ? bind : undefined,
-          rowMode: 'object',
-          returnValue: 'resultRows',
-        });
-      } else {
-        this.db.exec({ sql: statement, bind: bind.length > 0 ? bind : undefined });
+    const exec = () => {
+      // The cascade runs inside the changes window on purpose: a real DELETE with ON DELETE
+      // CASCADE counts the rows its actions touched in total_changes, and a soft delete of the
+      // same rows should not report a different number just because the deletion is being
+      // recorded rather than performed.
+      if (soft && table) {
+        const where = extractWhereClause(rawStatement);
+        if (where) cascadeSoftDelete(this, table, where.endsWith(';') ? where.slice(0, -1) : where, bind);
       }
-    } catch (err) {
-      throw prefixed('Run', err);
-    }
+      let rows: any[] | undefined;
+      try {
+        if (wantRows) {
+          rows = this.db.exec({
+            sql: statement,
+            bind: bind.length > 0 ? bind : undefined,
+            rowMode: 'object',
+            returnValue: 'resultRows',
+          });
+        } else {
+          this.db.exec({ sql: statement, bind: bind.length > 0 ? bind : undefined });
+        }
+      } catch (err) {
+        throw prefixed('Run', err);
+      }
+      return rows;
+    };
+
+    // A soft delete is a tree of UPDATEs, so it has to be all or nothing: a RESTRICT discovered
+    // three levels down, or any other failure mid-walk, must not leave half the subtree marked.
+    // withOptionalTransaction is a no-op when the caller already opened one.
+    const rows = soft ? this.withOptionalTransaction(true, exec) : exec();
+
+    // DDL does not only arrive through execute(). A CREATE TABLE issued with run() used to leave
+    // the cached schema answers in place, so a foreign key added that way was invisible to the
+    // next cascade and its children were never marked: exactly the silent divergence the cascade
+    // exists to prevent.
+    if (DDL.has(statementKind(rawStatement))) this.invalidateSyncCache();
+
     const result: ExecResult = { changes: this.totalChanges() - before, lastId: this.lastInsertRowid() };
     if (rows !== undefined) result.values = rows;
     return result;
