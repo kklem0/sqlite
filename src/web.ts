@@ -4,6 +4,7 @@ import type {
   CapacitorSQLitePlugin,
   capSQLiteImportDatabaseOptions,
   capSQLiteImportDatabaseResult,
+  capWebStoreInfo,
   capConnectionOptions,
   capAllConnectionsOptions,
   capChangeSecretOptions,
@@ -686,6 +687,12 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
     } finally {
       feed.close();
     }
+  }
+
+  /** Which tier the store is on, what it costs, and how much room is left where that is knowable. */
+  async getWebStoreInfo(): Promise<capWebStoreInfo> {
+    this.ensureStore();
+    return this.client.call('getWebStoreInfo', {});
   }
 
   ////////////////////////////////////

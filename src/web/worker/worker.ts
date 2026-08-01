@@ -10,7 +10,7 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 
 import { toErrorPayload } from '../errors';
-import type { ExecResult, OpenArgs, WorkerInitArgs, WorkerInitResult, WorkerRequest } from '../protocol';
+import type { ExecResult, OpenArgs, WebStoreInfo, WorkerInitArgs, WorkerInitResult, WorkerRequest } from '../protocol';
 import { BOOT_ID, EVENT_ID, EV_EXPORT_PROGRESS, EV_IMPORT_DATABASE_PROGRESS, EV_IMPORT_PROGRESS } from '../protocol';
 
 import type { AdoptionTarget } from './adoption';
@@ -59,6 +59,7 @@ let tier: 1 | 2 = 2;
 /** Constructed at init, because its IndexedDB name is derived from the configured pool name. */
 let images = new ImageStore('capacitor-sqlite');
 let options: WorkerInitArgs = { poolName: 'capacitor-sqlite', directory: '.capacitor-sqlite' };
+let fallbackReason: string | undefined;
 const connections = new Map<string, Connection>();
 
 /**
@@ -348,6 +349,7 @@ const ops: Record<string, (args: any) => any> = {
     const selection = await selectTier(sqlite3, args);
     tier = selection.tier;
     poolUtil = selection.poolUtil;
+    fallbackReason = selection.fallbackReason;
     if (tier === 1) await reserveCapacity(poolUtil, 4);
 
     // Before promotion or migration: a leftover staging file is not a database and must never be
@@ -818,6 +820,33 @@ const ops: Record<string, (args: any) => any> = {
       importing.delete(storage);
       puller.close();
     }
+  },
+
+  async getWebStoreInfo({ simulateNoEstimate }: { simulateNoEstimate?: boolean } = {}): Promise<WebStoreInfo> {
+    requireInit();
+    const info: WebStoreInfo = {
+      tier,
+      persistence: tier === 1 ? 'opfs' : 'indexeddb',
+      sqliteVersion: sqlite3.version.libVersion,
+      poolName: options.poolName,
+      directory: options.directory,
+      ...(fallbackReason ? { fallbackReason } : {}),
+    };
+    // Undefined on iOS 16.4, the oldest WebKit this plugin supports (PLAN 12.3 F4), so both
+    // fields are simply absent rather than the call failing.
+    // The test hook stands in for a browser that lacks the method, since the worker has its own
+    // navigator and the main thread cannot stub it from outside.
+    const storage = simulateNoEstimate ? undefined : (navigator as any)?.storage;
+    if (typeof storage?.estimate === 'function') {
+      try {
+        const estimate = await storage.estimate();
+        if (typeof estimate?.quota === 'number') info.quota = estimate.quota;
+        if (typeof estimate?.usage === 'number') info.usage = estimate.usage;
+      } catch {
+        // A browser that has the method and refuses to answer is the same as one that lacks it.
+      }
+    }
+    return info;
   },
 
   /** Test hook: the wasm heap, the one memory figure a worker can measure about itself (S9). */
