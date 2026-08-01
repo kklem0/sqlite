@@ -7,6 +7,20 @@ All notable changes to this project will be documented in this file. See [commit
 Entries below this heading exist only on the fork's release branch. Upstream releases and their
 generated entries continue underneath, unchanged, and the fork tracks them.
 
+### 8.2.0-sssf.3 (2026-08-02)
+
+Native iOS and Android work. No web changes, and no API changes.
+
+Android arrives through upstream: [#695](https://github.com/capacitor-community/sqlite/pull/695) merged, so this release rebases onto a master that carries it. iOS is carried ahead of merge from [#696](https://github.com/capacitor-community/sqlite/pull/696), this fork's open follow-up, under the amended native policy in the README banner: native tracks upstream and may additionally carry only this fork's own upstream-pending pull requests, which retire on their own once merged.
+
+* **android:** `net.zetetic:sqlcipher-android` 4.10.0 to 4.17.0, a SQLite 3.53.3 baseline, via the upstream merge of #695
+* **ios:** SQLCipher is pinned on both dependency managers. Swift Package Manager takes `SQLCipher.swift` 4.17.0 exactly, matching Android; CocoaPods takes 4.10.0, which is the last version SQLCipher ever published to the trunk, since its 4.11.0 removed CocoaPods support outright
+* **ios:** Swift Package Manager is now the built and verified path. `verify:ios` builds the package, library and test target, for an iOS Simulator destination, and a second gate runs `pod lib lint` so the CocoaPods compatibility path cannot break unnoticed
+* **ios:** the XCTest target compiles again. It had never built under Swift Package Manager: it imported the Xcode workspace's module name, and its call to `CapacitorSQLite()` predated the `config:` parameter. Nothing built it, so nothing reported it
+* **ios:** the unused CocoaPods development workspace is removed (`ios/Podfile`, `ios/Plugin.xcodeproj`, `ios/Plugin.xcworkspace`); `pod lib lint` covers what building it covered, against the version consumers actually resolve
+* **ios:** five compiler warnings cleared in the plugin sources, each without behaviour change, so the podspec gate runs with no warnings allowed
+* **build:** SwiftLint no longer lints the Swift Package Manager checkouts under `.build`
+
 ### 8.2.0-sssf.2 (2026-08-02)
 
 Fixes found by running 8.2.0-sssf.1 on a physical iPhone and inside a real Vite consumer app.
