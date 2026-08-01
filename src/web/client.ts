@@ -11,8 +11,8 @@
  *   `throw new Error(\`${err}\`)` stringification the jeep facade used.
  */
 import { fromErrorPayload } from './errors';
-import type { WorkerResponse } from './protocol';
-import { BOOT_ID } from './protocol';
+import type { WorkerEvent, WorkerResponse } from './protocol';
+import { BOOT_ID, EVENT_ID } from './protocol';
 import { createSqliteWorker } from './worker-factory';
 
 interface Pending {
@@ -26,6 +26,8 @@ export class WorkerClient {
   private pending = new Map<number, Pending>();
   private queues = new Map<string, Promise<unknown>>();
   private booted: Promise<void> | null = null;
+  /** Set by the facade so worker-raised events reach notifyListeners. */
+  onEvent: ((event: string, data: any) => void) | null = null;
 
   get isStarted(): boolean {
     return this.worker !== null;
@@ -42,6 +44,11 @@ export class WorkerClient {
         if (!message || typeof message.id !== 'number') return;
         if (message.id === BOOT_ID) {
           resolve();
+          return;
+        }
+        if (message.id === EVENT_ID) {
+          const raised = message as unknown as WorkerEvent;
+          this.onEvent?.(raised.event, raised.data);
           return;
         }
         const entry = this.pending.get(message.id);

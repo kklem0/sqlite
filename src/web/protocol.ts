@@ -69,6 +69,25 @@ export type WorkerResponse =
 export const BOOT_ID = -1;
 
 /**
+ * Sent unsolicited by the worker to raise a plugin event. The facade forwards these to
+ * `notifyListeners`, which is how the five documented web events reach the app.
+ */
+export const EVENT_ID = -2;
+
+export interface WorkerEvent {
+  id: typeof EVENT_ID;
+  event: string;
+  data: any;
+}
+
+/** The five events the web implementation has always emitted (PLAN 2.4). */
+export const EV_IMPORT_PROGRESS = 'sqliteImportProgressEvent';
+export const EV_EXPORT_PROGRESS = 'sqliteExportProgressEvent';
+export const EV_HTTP_REQUEST_ENDED = 'sqliteHTTPRequestEndedEvent';
+export const EV_PICK_DATABASE_ENDED = 'sqlitePickDatabaseEndedEvent';
+export const EV_SAVE_TO_DISK = 'sqliteSaveDatabaseToDiskEvent';
+
+/**
  * The IndexedDB database and object store backing tier 2 images.
  *
  * The database name is derived from the pool name so that the two tiers namespace identically.
