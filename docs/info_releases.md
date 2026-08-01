@@ -90,6 +90,27 @@
 
   Encryption is still not supported on Web.
 
+  Two additive Web-only methods come with this release. Neither changes anything that already
+  exists, and both reject on the native platforms.
+
+   - `importDatabase({ database, source, overwrite })` takes a `Uint8Array`, a `Blob` or a
+     `ReadableStream` and turns it into a database. The source is read one chunk at a time and
+     never held whole, so an app that downloads its own bundles, with its own auth headers and
+     its own resume logic, can hand the response stream straight over without buffering it. The
+     bytes are staged and checked with `PRAGMA integrity_check` before anything replaces the
+     target, so a download that fails half way leaves the database already installed untouched.
+     Progress arrives on a new `sqliteImportDatabaseProgressEvent`.
+
+     Two things to know. What gets stored is a compacted logical copy of the input, not the
+     input's bytes, so a checksum of a downloaded bundle belongs on the bytes you downloaded,
+     before you hand them over. And replacing an existing database briefly needs room for three
+     copies of it, the old one, the staged import and the copy being written into place.
+
+   - `getWebStoreInfo()` reports the durability tier, whether the bytes rest in OPFS or
+     IndexedDB, the SQLite version and the pool identity, plus storage quota and usage where the
+     browser can report them. `quota` and `usage` are absent on browsers without
+     `navigator.storage.estimate`, iOS 16.4 among them, so check before reading them.
+
   See [Web Usage](https://github.com/capacitor-community/sqlite/blob/master/docs/Web-Usage.md).
 
 🚨 Release 8.2.0 <<- 🚨
