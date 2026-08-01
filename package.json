@@ -40,7 +40,7 @@
   "scripts": {
     "verify": "npm run verify:ios && npm run verify:ios:pod && npm run verify:android && npm run verify:web && npm run verify:electron",
     "verify:ios": "xcodebuild build-for-testing -scheme CapacitorCommunitySqlite -destination 'generic/platform=iOS Simulator'",
-    "verify:ios:pod": "pod lib lint CapacitorCommunitySqlite.podspec --allow-warnings",
+    "verify:ios:pod": "pod lib lint CapacitorCommunitySqlite.podspec",
     "verify:android": "cd android && ./gradlew clean build test && cd ..",
     "verify:web": "npm run build",
     "verify:electron": "npm run build-electron",

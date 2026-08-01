@@ -2,14 +2,18 @@ require 'json'
 
 package = JSON.parse(File.read(File.join(__dir__, 'package.json')))
 
+# package.json carries the npm form of the repository URL, `git+https://...`. CocoaPods parses
+# this as a `git+https` scheme and warns that GitHub sources should use an `https` link.
+repository_url = package['repository']['url'].sub(%r{\Agit\+}, '')
+
 Pod::Spec.new do |s|
   s.name = 'CapacitorCommunitySqlite'
   s.version = package['version']
   s.summary = package['description']
   s.license = package['license']
-  s.homepage = package['repository']['url']
+  s.homepage = repository_url
   s.author = package['author']
-  s.source = { :git => package['repository']['url'], :tag => s.version.to_s }
+  s.source = { :git => repository_url, :tag => s.version.to_s }
   s.source_files = 'ios/Plugin/**/*.{swift,h,m,c,cc,mm,cpp}'
   s.ios.deployment_target = '15.0'
   s.dependency 'Capacitor'
