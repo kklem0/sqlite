@@ -20,9 +20,10 @@ import { ImageStore, deserializeInto } from './images';
 import { exportJson } from './json/export';
 import { importJson } from './json/import';
 import { isJsonSQLite, parseJsonSQLite } from './json/validate';
-import type { JeepMigrationTarget } from './migrate-jeep';
+import type { AdoptionTarget } from './adoption';
 import { migrateFromJeep } from './migrate-jeep';
 import { connKey, fromPoolPath, poolPath, reserveCapacity, storageName } from './paths';
+import { promoteImages } from './promote';
 import * as sync from './sync';
 import { selectTier } from './tiers';
 import { runUpgrades } from './upgrades';
@@ -78,11 +79,12 @@ function assetTarget(): AssetTarget {
 }
 
 /**
- * The tier-specific half of the jeep-sqlite migration. Adoption goes through the same import
- * path a downloaded database takes; verification opens what was adopted and asks sqlite whether
- * it is a database at all, which is the only check that would catch a truncated legacy image.
+ * Adoption into whichever tier is active, shared by the jeep-sqlite migration and the tier-2 to
+ * tier-1 promotion. Adoption goes through the same import path a downloaded database takes;
+ * verification opens what was adopted and asks sqlite whether it is a database at all, which is
+ * the only check that would catch a truncated image.
  */
-function migrationTarget(): JeepMigrationTarget {
+function adoptionTarget(): AdoptionTarget {
   const target = assetTarget();
   return {
     exists: (storage) => target.exists(storage),
@@ -196,14 +198,18 @@ const ops: Record<string, (args: any) => any> = {
     poolUtil = selection.poolUtil;
     if (tier === 1) await reserveCapacity(poolUtil, 4);
 
-    // Runs before any connection is opened, so an import can never race a live database.
-    const migration = args.skipJeepMigration ? null : await migrateFromJeep(images, migrationTarget());
+    // Both passes run before any connection is opened, so neither can race a live database.
+    // Promotion goes first: an image in the fallback store is this app's own data from an earlier
+    // boot, so it outranks anything the jeep-sqlite store may name the same.
+    const promotion = tier === 1 ? await promoteImages(images, adoptionTarget()) : null;
+    const migration = args.skipJeepMigration ? null : await migrateFromJeep(images, adoptionTarget());
 
     return {
       tier,
       sqliteVersion: sqlite3.version.libVersion,
       ...(selection.fallbackReason ? { fallbackReason: selection.fallbackReason } : {}),
       ...(migration && (migration.ran || migration.warning) ? { migration } : {}),
+      ...(promotion && (promotion.promoted.length > 0 || promotion.warning) ? { promotion } : {}),
     };
   },
 

@@ -39,7 +39,13 @@ import type {
 import { WorkerClient } from './web/client';
 import { WEBSTORE_NOT_OPEN, messageOf, prefixed } from './web/errors';
 import { connectionNameFromFile, getLocalDiskAdapter } from './web/localdisk';
-import type { JeepMigrationResult, SerializedUpgrade, Tier, WorkerInitResult } from './web/protocol';
+import type {
+  JeepMigrationResult,
+  SerializedUpgrade,
+  Tier,
+  TierPromotionResult,
+  WorkerInitResult,
+} from './web/protocol';
 import { EV_PICK_DATABASE_ENDED, EV_SAVE_TO_DISK, EV_HTTP_REQUEST_ENDED } from './web/protocol';
 import { ConnectionRegistry, parseKey, reconcile } from './web/registry';
 import { connKey, storageName } from './web/worker/paths';
@@ -63,6 +69,21 @@ function reportMigration(migration: WorkerInitResult['migration']): void {
 }
 
 /**
+ * The tier-2 to tier-1 promotion. Silence means the fallback store was empty, which is the case
+ * for every installation that has only ever run on OPFS.
+ */
+function reportPromotion(promotion: WorkerInitResult['promotion']): void {
+  if (!promotion) return;
+  if (promotion.promoted.length > 0) {
+    console.info(
+      `[capacitor-sqlite] moved ${promotion.promoted.length} database(s) out of the IndexedDB ` +
+        `fallback store into OPFS: ${promotion.promoted.join(', ')}.`,
+    );
+  }
+  if (promotion.warning) console.warn(`[capacitor-sqlite] ${promotion.warning}`);
+}
+
+/**
  * Web implementation backed by `@sqlite.org/sqlite-wasm` in a dedicated worker.
  *
  * Tier 1 stores databases in OPFS through the `opfs-sahpool` VFS, which needs neither COOP/COEP
@@ -82,6 +103,7 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
       this.client.onEvent = (event, data) => this.notifyListeners(event, data);
       await this.client.start();
       this.store = await this.client.call('init', getSqliteWebOptions());
+      reportPromotion(this.store?.promotion);
       reportMigration(this.store?.migration);
     } catch (err) {
       this.store = null;
@@ -101,6 +123,14 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
    */
   getJeepMigration(): JeepMigrationResult | null {
     return this.store?.migration ?? null;
+  }
+
+  /**
+   * What the tier-2 to tier-1 promotion did on this boot, or null when there was nothing in the
+   * fallback store to move. Additive; not part of CapacitorSQLitePlugin.
+   */
+  getTierPromotion(): TierPromotionResult | null {
+    return this.store?.promotion ?? null;
   }
 
   /**

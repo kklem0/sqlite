@@ -34,6 +34,9 @@
 import { messageOf } from '../errors';
 import type { JeepMigrationResult } from '../protocol';
 
+import type { AdoptionTarget } from './adoption';
+import { looksLikeSQLite } from './adoption';
+
 /** localforage `name` and `storeName` from jeep's `setConfig` (jeep-sqlite.js `setConfig`). */
 export const JEEP_DB_NAME = 'jeepSqliteStore';
 export const JEEP_STORE_NAME = 'databases';
@@ -43,8 +46,6 @@ export const JEEP_MIGRATION_MARKER = 'jeep-migration';
 
 const BACKUP_PREFIX = 'backup-';
 const SUFFIX = 'SQLite.db';
-/** The first 16 bytes of every SQLite file are these 15 characters followed by a NUL. */
-const SQLITE_HEADER = 'SQLite format 3';
 /** How long to wait for a delete that another context is blocking before giving up on it. */
 const DELETE_TIMEOUT_MS = 5000;
 
@@ -55,19 +56,12 @@ export interface MarkerStore {
 }
 
 /**
- * The tier-specific half. Nothing here ever writes over a database that is already in the store:
- * `exists` is consulted first, and a taken name fails that database instead. The migration cannot
- * know whether such a database is a leftover of its own or one the app has been using, and only
- * one of those two is safe to overwrite.
+ * The tier-specific half, shared with the tier-promotion pass. Nothing here ever writes over a
+ * database that is already in the store: `exists` is consulted first, and a taken name fails that
+ * database instead. The migration cannot know whether such a database is a leftover of its own or
+ * one the app has been using, and only one of those two is safe to overwrite.
  */
-export interface JeepMigrationTarget {
-  exists(storage: string): Promise<boolean>;
-  adopt(storage: string, bytes: Uint8Array): Promise<void>;
-  /** Open what was adopted and run `PRAGMA integrity_check`. Throws when it is not a database. */
-  verify(storage: string): Promise<void>;
-  /** Undo an adopt whose verification failed, so no unreadable file is left behind. */
-  discard(storage: string): Promise<void>;
-}
+export type JeepMigrationTarget = AdoptionTarget;
 
 interface LegacyEntry {
   key: string;
@@ -101,14 +95,6 @@ async function toBytes(value: unknown): Promise<Uint8Array | null | undefined> {
   }
   if (typeof Blob !== 'undefined' && value instanceof Blob) return new Uint8Array(await value.arrayBuffer());
   return undefined;
-}
-
-function looksLikeSQLite(bytes: Uint8Array): boolean {
-  if (bytes.byteLength < SQLITE_HEADER.length) return false;
-  for (let i = 0; i < SQLITE_HEADER.length; i++) {
-    if (bytes[i] !== SQLITE_HEADER.charCodeAt(i)) return false;
-  }
-  return true;
 }
 
 /**
