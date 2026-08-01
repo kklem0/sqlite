@@ -13,3 +13,5 @@ export * from './definitions';
 // signature; they exist so bundlers that cannot resolve the shipped worker can supply their own.
 export { setSqliteWorkerFactory, setSqliteWebOptions } from './web/worker-factory';
 export type { SqliteWorkerFactory } from './web/worker-factory';
+export { setSqliteLocalDiskAdapter } from './web/localdisk';
+export type { LocalDiskAdapter, PickedFile } from './web/localdisk';

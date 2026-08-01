@@ -18,6 +18,8 @@ export interface WorkerInitArgs {
   simulateInstallError?: string;
   /** Override where sqlite3.wasm is fetched from. Defaults to a sibling of the worker file. */
   wasmUrl?: string;
+  /** Where copyFromAssets looks for databases.json. Defaults to `assets/databases/`. */
+  assetsPath?: string;
 }
 
 export interface WorkerInitResult {
