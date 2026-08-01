@@ -13,6 +13,7 @@ import { toErrorPayload } from '../errors';
 import type { ExecResult, OpenArgs, WorkerInitArgs, WorkerInitResult, WorkerRequest } from '../protocol';
 import { BOOT_ID, EVENT_ID, EV_EXPORT_PROGRESS, EV_IMPORT_PROGRESS } from '../protocol';
 
+import type { AdoptionTarget } from './adoption';
 import type { AssetTarget } from './assets';
 import { copyFromAssets, getFromHTTPRequest } from './assets';
 import { Connection, wantsRows } from './engine';
@@ -20,7 +21,6 @@ import { ImageStore, deserializeInto } from './images';
 import { exportJson } from './json/export';
 import { importJson } from './json/import';
 import { isJsonSQLite, parseJsonSQLite } from './json/validate';
-import type { AdoptionTarget } from './adoption';
 import { migrateFromJeep } from './migrate-jeep';
 import { connKey, fromPoolPath, poolPath, reserveCapacity, storageName } from './paths';
 import { promoteImages } from './promote';
@@ -452,8 +452,13 @@ const ops: Record<string, (args: any) => any> = {
     const storage = storageName(database);
 
     // `overwrite` with a full import means start from an empty database, not merge into one.
+    // Whatever was open has to be closed first, since the file itself goes, but the caller is
+    // still holding those connections and gets "Database X is not open" on its next statement
+    // unless they are put back afterwards.
+    const reopen: boolean[] = [];
     if (jsonData.overwrite && mode === 'full') {
       for (const conn of connectionsFor(database)) {
+        reopen.push(conn.isReadonly);
         conn.close();
         connections.delete(connKey(database, conn.isReadonly));
       }
@@ -476,6 +481,11 @@ const ops: Record<string, (args: any) => any> = {
       }
       return importJson(conn, jsonData, progress);
     });
+
+    for (const readonly of reopen) {
+      const conn = tier === 1 ? openRaw(storage, readonly) : await openTier2(storage, readonly);
+      connections.set(connKey(database, readonly), conn);
+    }
 
     progress(`Import completed, changes: ${changes}`);
     return { changes, lastId: -1 };
