@@ -20,6 +20,12 @@ export interface WorkerInitArgs {
   wasmUrl?: string;
   /** Where copyFromAssets looks for databases.json. Defaults to `assets/databases/`. */
   assetsPath?: string;
+  /**
+   * Skip the one-time import of jeep-sqlite's IndexedDB store. Only for an app that wants to
+   * keep the legacy store for its own reasons; the migration is otherwise safe to leave on,
+   * since it is a no-op once it has run and on any installation that never used jeep-sqlite.
+   */
+  skipJeepMigration?: boolean;
 }
 
 export interface WorkerInitResult {
@@ -27,6 +33,25 @@ export interface WorkerInitResult {
   sqliteVersion: string;
   /** Reason the probe fell back, for logging. Absent on tier 1. */
   fallbackReason?: string;
+  /** Outcome of the one-time jeep-sqlite migration. Absent when it had already run. */
+  migration?: JeepMigrationResult;
+}
+
+/**
+ * What the one-time jeep-sqlite migration did. Reported rather than thrown: a store that cannot
+ * be migrated must leave the legacy data untouched and warn, not stop the app from booting.
+ */
+export interface JeepMigrationResult {
+  /** False when there was no legacy store to read. */
+  ran: boolean;
+  /** Connection names imported into the active tier. */
+  migrated: string[];
+  /** Legacy keys deliberately passed over: `backup-*` copies and never-saved placeholders. */
+  skipped: string[];
+  /** Connection names whose import or verification failed. Empty on success. */
+  failed: string[];
+  legacyStoreDeleted: boolean;
+  warning?: string;
 }
 
 export interface OpenArgs {
@@ -99,6 +124,17 @@ export const EV_SAVE_TO_DISK = 'sqliteSaveDatabaseToDiskEvent';
  * to depend on which tier the browser happened to select.
  */
 export const IMAGE_STORE_NAME = 'databases';
+
+/**
+ * Companion store for bookkeeping that is not a database image, currently only the marker that
+ * says the one-time jeep-sqlite migration has already run. It is a second object store rather
+ * than a reserved key in `databases` so that `getDatabaseList()` on tier 2, which enumerates that
+ * store, cannot ever see it.
+ */
+export const META_STORE_NAME = 'meta';
+
+/** Bumped from 1 to 2 when META_STORE_NAME was added. */
+export const IMAGE_STORE_VERSION = 2;
 
 export function imageStoreDbName(poolName: string): string {
   return `${poolName}-store`;
