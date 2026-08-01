@@ -99,6 +99,12 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
 
   /** Connections closed by pauseWebStore, waiting to be reopened. Null when not paused. */
   private paused: { database: string; readonly: boolean }[] | null = null;
+  /**
+   * The pause currently in flight. `paused` above cannot be published until the worker answers,
+   * and on a real device the OS can freeze the page inside exactly that round trip, so a resume
+   * needs something to wait for that exists from the moment the pause starts.
+   */
+  private pausing: Promise<void> | null = null;
   private visibilityListener: (() => void) | null = null;
 
   async initWebStore(): Promise<void> {
@@ -156,15 +162,26 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
    * operation rather than something the caller has to remember (M0 finding S4).
    */
   async pauseWebStore(): Promise<void> {
+    // A second caller joins the first rather than starting a competing pause, which is what keeps
+    // this idempotent alongside the automatic listener.
+    if (this.pausing) return this.pausing;
     if (!this.store || this.paused) return;
-    const result = await this.client.call('pause', {});
-    this.paused = result.reopen ?? [];
-    if (result.interrupted?.length > 0) {
-      // In-flight transactions cannot survive the close. Rolled back, and said out loud.
-      console.warn(
-        `[capacitor-sqlite] rolled back an open transaction on ${result.interrupted.join(', ')} ` +
-          'while pausing the store for the background.',
-      );
+    const pausing = (async () => {
+      const result = await this.client.call('pause', {});
+      this.paused = result.reopen ?? [];
+      if (result.interrupted?.length > 0) {
+        // In-flight transactions cannot survive the close. Rolled back, and said out loud.
+        console.warn(
+          `[capacitor-sqlite] rolled back an open transaction on ${result.interrupted.join(', ')} ` +
+            'while pausing the store for the background.',
+        );
+      }
+    })();
+    this.pausing = pausing;
+    try {
+      await pausing;
+    } finally {
+      if (this.pausing === pausing) this.pausing = null;
     }
   }
 
@@ -174,6 +191,18 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
    * down, start a new one, re-run init, and reopen from the same record (PLAN 6.7).
    */
   async resumeWebStore(): Promise<void> {
+    // Wait for a pause that has not finished publishing its state. Measured on an iPhone: iOS
+    // suspends the page inside the pause's worker round trip and then delivers the foreground
+    // signal first, so a resume that reads `paused` straight away sees null, returns a no-op, and
+    // the pause completes afterwards and closes every connection. The store would be left shut
+    // with nothing to reopen it until the app went round the cycle again (PLAN 18.4).
+    if (this.pausing) {
+      try {
+        await this.pausing;
+      } catch {
+        // A pause that failed published no state to restore; fall through to what it did set.
+      }
+    }
     if (!this.store || !this.paused) return;
     const reopen = this.paused;
     this.paused = null;

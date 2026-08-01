@@ -143,6 +143,36 @@ describe.each(TIERS)('%s', (tier) => {
     expect((await db.query('SELECT v FROM t')).values).toEqual([{ v: 'before' }]);
   });
 
+  test(`${label}: a resume that arrives before the pause has finished still restores the store`, async () => {
+    const { plugin } = await boot(tier, 'race');
+    const db = await seeded(plugin, 'race');
+
+    // The device sequence from PLAN 18.4, reproduced without a device: iOS freezes the page
+    // inside pauseWebStore's worker round trip and delivers the foreground signal first, so the
+    // resume runs while the pause is still in flight and before it has published any state.
+    const pausing = plugin.pauseWebStore();
+    const resuming = plugin.resumeWebStore();
+    await Promise.all([pausing, resuming]);
+
+    // Before the fix this read failed with "Database race is not open": the resume had returned a
+    // no-op and the pause then closed every connection with nothing left to reopen them.
+    expect((await db.query('SELECT v FROM t')).values).toEqual([{ v: 'before' }]);
+    await db.run('INSERT INTO t (v) VALUES (?)', ['after the race']);
+    expect((await db.query('SELECT v FROM t ORDER BY id')).values).toEqual([{ v: 'before' }, { v: 'after the race' }]);
+  });
+
+  test(`${label}: the store is usable again after a raced pause and resume, without a second cycle`, async () => {
+    const { plugin } = await boot(tier, 'race2');
+    const db = await seeded(plugin, 'race2');
+
+    // Same race, driven the way the plugin's own listener drives it: neither call is awaited by
+    // the caller, which is what `void (going ? pause : resume)()` does in watchAppState.
+    void plugin.pauseWebStore();
+    await plugin.resumeWebStore();
+
+    expect((await db.query('SELECT v FROM t')).values).toEqual([{ v: 'before' }]);
+  });
+
   test(`${label}: a transaction open at pause time is rolled back and reported`, async () => {
     const { plugin } = await boot(tier, 'txn');
     const db = await seeded(plugin, 'txn');
