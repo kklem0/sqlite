@@ -11,10 +11,13 @@ import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 
 import { toErrorPayload } from '../errors';
 import type { ExecResult, OpenArgs, WorkerInitArgs, WorkerInitResult, WorkerRequest } from '../protocol';
-import { BOOT_ID } from '../protocol';
+import { BOOT_ID, EVENT_ID, EV_EXPORT_PROGRESS, EV_IMPORT_PROGRESS } from '../protocol';
 
 import { Connection, wantsRows } from './engine';
 import { ImageStore, deserializeInto } from './images';
+import { exportJson } from './json/export';
+import { importJson } from './json/import';
+import { isJsonSQLite, parseJsonSQLite } from './json/validate';
 import { connKey, fromPoolPath, poolPath, reserveCapacity, storageName } from './paths';
 import { selectTier } from './tiers';
 import { runUpgrades } from './upgrades';
@@ -40,6 +43,31 @@ const connections = new Map<string, Connection>();
 
 function requireInit(): void {
   if (!sqlite3) throw new Error('The SQLite worker is not initialised.');
+}
+
+/** Raise a plugin event. The facade forwards these to notifyListeners. */
+function raise(event: string, data: any): void {
+  self.postMessage({ id: EVENT_ID, event, data });
+}
+
+/**
+ * importFromJson names its own target database, which may or may not already be open. Reuse an
+ * open read-write connection when there is one so the caller keeps seeing its own data, and
+ * otherwise open a scratch connection and close it again.
+ */
+async function withWritableConnection<T>(database: string, body: (conn: Connection) => Promise<T> | T): Promise<T> {
+  const existing = connections.get(connKey(database, false));
+  if (existing) return body(existing);
+
+  const storage = storageName(database);
+  const conn = tier === 1 ? openRaw(storage, false) : await openTier2(storage, false);
+  try {
+    const result = await body(conn);
+    if (tier !== 1) await images.put(storage, conn.serialize());
+    return result;
+  } finally {
+    if (conn.isOpen) conn.close();
+  }
 }
 
 function connection(database: string, readonly: boolean): Connection {
@@ -326,6 +354,77 @@ const ops: Record<string, (args: any) => any> = {
     const image = await images.get(storage);
     if (!image) throw new Error(`Database ${database} does not exist`);
     return { bytes: image };
+  },
+
+  // ---------------------------------------------------------------- JSON pipeline
+
+  async isJsonValid({ jsonstring }: { jsonstring: string }) {
+    try {
+      return { result: isJsonSQLite(JSON.parse(jsonstring)) };
+    } catch {
+      return { result: false };
+    }
+  },
+
+  async importFromJson({ jsonstring }: { jsonstring: string }) {
+    requireInit();
+    const jsonData = parseJsonSQLite(jsonstring);
+    if (jsonData.encrypted) {
+      throw new Error('ImportFromJson: encrypted databases are not supported on the web platform');
+    }
+    const mode = jsonData.mode ?? 'full';
+    const database = jsonData.database;
+    const storage = storageName(database);
+
+    // `overwrite` with a full import means start from an empty database, not merge into one.
+    if (jsonData.overwrite && mode === 'full') {
+      for (const conn of connectionsFor(database)) {
+        conn.close();
+        connections.delete(connKey(database, conn.isReadonly));
+      }
+      if (tier === 1) poolUtil.unlink(poolPath(storage));
+      else await images.delete(storage);
+    }
+
+    const progress = (message: string) => raise(EV_IMPORT_PROGRESS, { progress: message });
+    progress(`Start importing the database ${database}`);
+
+    const changes = await withWritableConnection(database, (conn) => {
+      // A full import into a database that already sits at the target version is a no-op, which
+      // is what makes repeated imports of the same payload cheap.
+      if (mode === 'full' && conn.tableList().length > 0) {
+        const current = conn.userVersion();
+        if (jsonData.version < current) {
+          throw new Error(`ImportFromJson: Cannot import a version lower than ${current}`);
+        }
+        if (jsonData.version === current) return 0;
+      }
+      return importJson(conn, jsonData, progress);
+    });
+
+    progress(`Import completed, changes: ${changes}`);
+    return { changes, lastId: -1 };
+  },
+
+  async exportToJson({
+    database,
+    readonly,
+    jsonexportmode,
+    encrypted,
+  }: {
+    database: string;
+    readonly: boolean;
+    jsonexportmode: string;
+    encrypted?: boolean;
+  }) {
+    if (encrypted) {
+      throw new Error('ExportToJson: encrypted export is not supported on the web platform');
+    }
+    const conn = connection(database, readonly);
+    const progress = (message: string) => raise(EV_EXPORT_PROGRESS, { progress: message });
+    const exported = exportJson(conn, database, jsonexportmode, progress);
+    if (tier !== 1 && !conn.isReadonly) await images.put(conn.storage, conn.serialize());
+    return { export: exported };
   },
 
   /**

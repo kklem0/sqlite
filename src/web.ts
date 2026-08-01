@@ -60,6 +60,7 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   async initWebStore(): Promise<void> {
     if (this.store) return;
     try {
+      this.client.onEvent = (event, data) => this.notifyListeners(event, data);
       await this.client.start();
       this.store = await this.client.call('init', getSqliteWebOptions());
     } catch (err) {
@@ -347,32 +348,31 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   }
 
   ////////////////////////////////////
-  ////// NOT YET PORTED TO THE NEW ENGINE
+  ////// JSON PIPELINE
   ////////////////////////////////////
 
-  async getFromLocalDiskToStore(options: capSQLiteLocalDiskOptions): Promise<void> {
-    console.log('getFromLocalDiskToStore', options);
-    throw this.unimplemented('Not implemented on web.');
-  }
-
-  async saveToLocalDisk(options: capSQLiteOptions): Promise<void> {
-    console.log('saveToLocalDisk', options);
-    throw this.unimplemented('Not implemented on web.');
-  }
-
   async isJsonValid(options: capSQLiteImportOptions): Promise<capSQLiteResult> {
-    console.log('isJsonValid', options);
-    throw this.unimplemented('Not implemented on web.');
+    const jsonstring = CapacitorSQLiteWeb.optionValue<string>(options, 'jsonstring');
+    return this.call('isJsonValid', { jsonstring });
   }
 
   async importFromJson(options: capSQLiteImportOptions): Promise<capSQLiteChanges> {
-    console.log('importFromJson', options);
-    throw this.unimplemented('Not implemented on web.');
+    const jsonstring = CapacitorSQLiteWeb.optionValue<string>(options, 'jsonstring');
+    const result = await this.call('importFromJson', { jsonstring });
+    return { changes: { changes: result.changes, lastId: result.lastId } };
   }
 
   async exportToJson(options: capSQLiteExportOptions): Promise<capSQLiteJson> {
-    console.log('exportToJson', options);
-    throw this.unimplemented('Not implemented on web.');
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const jsonexportmode = CapacitorSQLiteWeb.optionValue<string>(options, 'jsonexportmode');
+    const readonly = options.readonly ?? false;
+    this.requireOpen(database, readonly, 'ExportToJson');
+    return this.call(
+      'exportToJson',
+      { database, readonly, jsonexportmode, encrypted: options.encrypted ?? false },
+      database,
+      readonly,
+    );
   }
 
   async createSyncTable(options: capSQLiteOptions): Promise<capSQLiteChanges> {
@@ -404,6 +404,17 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
     console.log('getFromHTTPRequest', options);
     throw this.unimplemented('Not implemented on web.');
   }
+
+  async getFromLocalDiskToStore(options: capSQLiteLocalDiskOptions): Promise<void> {
+    console.log('getFromLocalDiskToStore', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async saveToLocalDisk(options: capSQLiteOptions): Promise<void> {
+    console.log('saveToLocalDisk', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
 
   ////////////////////////////////////
   ////// UNIMPLEMENTED METHODS
