@@ -35,6 +35,22 @@ export interface WorkerInitResult {
   fallbackReason?: string;
   /** Outcome of the one-time jeep-sqlite migration. Absent when it had already run. */
   migration?: JeepMigrationResult;
+  /** Outcome of the tier-2 to tier-1 promotion. Absent on tier 2 and when there was nothing to move. */
+  promotion?: TierPromotionResult;
+}
+
+/**
+ * What the tier-promotion pass did. Reported rather than thrown: an image that cannot be moved
+ * into the pool is still readable by a tier 2 context, so it is a warning, not a boot failure.
+ */
+export interface TierPromotionResult {
+  /** Storage names moved from the IndexedDB image store into the OPFS pool. */
+  promoted: string[];
+  /** Images whose name is already in the pool. The pool copy wins; the image is kept, not deleted. */
+  conflicts: string[];
+  /** Images that could not be moved. Still in the image store, retried on the next start. */
+  failed: string[];
+  warning?: string;
 }
 
 /**
