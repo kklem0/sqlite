@@ -70,6 +70,22 @@ export interface JeepMigrationResult {
   warning?: string;
 }
 
+/**
+ * What `getWebStoreInfo` reports. `quota` and `usage` are optional because
+ * `navigator.storage.estimate` is undefined on iOS 16.4, the oldest WebKit this plugin supports
+ * (PLAN 12.3 F4), so a consumer cannot read them without checking.
+ */
+export interface WebStoreInfo {
+  tier: Tier;
+  persistence: 'opfs' | 'indexeddb';
+  sqliteVersion: string;
+  poolName: string;
+  directory: string;
+  fallbackReason?: string;
+  quota?: number;
+  usage?: number;
+}
+
 export interface OpenArgs {
   database: string;
   readonly: boolean;
