@@ -50,6 +50,38 @@ export interface CapacitorSQLitePlugin {
 
   saveToLocalDisk(options: capSQLiteOptions): Promise<void>;
   /**
+   * Import a database from bytes the caller supplies
+   *
+   * Web only. The source is read one chunk at a time and never held whole, so a multi-hundred
+   * megabyte bundle costs a chunk of memory rather than its own size. This is the method to use
+   * when the app does its own download: authenticated requests, range resume and retry policy all
+   * stay with the app, and only the bytes are handed over.
+   *
+   * The bytes are staged and verified with `PRAGMA integrity_check` before anything replaces the
+   * target, so a truncated or corrupt source leaves an existing database exactly as it was. What
+   * is stored is a compacted logical copy of the input, not the input's bytes, so any checksum of
+   * a downloaded bundle belongs on the downloaded bytes rather than on the stored database.
+   *
+   * Rejects on iOS, Android and Electron, where the plugin does not register this method.
+   *
+   * @param options: capSQLiteImportDatabaseOptions
+   * @return Promise<capSQLiteImportDatabaseResult>
+   * @since 8.2.0
+   */
+  importDatabase(options: capSQLiteImportDatabaseOptions): Promise<capSQLiteImportDatabaseResult>;
+  /**
+   * Report how the web store is persisting data, and how much room it has
+   *
+   * Web only. `quota` and `usage` are absent on browsers that do not implement
+   * `navigator.storage.estimate`, iOS 16.4 among them, so check before reading them.
+   *
+   * Rejects on iOS, Android and Electron, where the plugin does not register this method.
+   *
+   * @return Promise<capWebStoreInfo>
+   * @since 8.2.0
+   */
+  getWebStoreInfo(): Promise<capWebStoreInfo>;
+  /**
    * Check if a passphrase exists in a secure store
    *
    * @return Promise<capSQLiteResult>
@@ -745,6 +777,110 @@ export interface capSQLiteLocalDiskOptions {
    */
   overwrite?: boolean;
 }
+/**
+ * Anything `importDatabase` will read bytes from.
+ *
+ * A `ReadableStream` is read on demand and never buffered whole, which is what makes a large
+ * download affordable. A `Blob` is sliced as it goes, so a file-backed Blob is never fully
+ * realised. A `Uint8Array` is already in memory and is handed over in chunks for uniformity.
+ */
+export type capSQLiteImportSource = Uint8Array | Blob | ReadableStream<Uint8Array>;
+
+export interface capSQLiteImportDatabaseOptions {
+  /**
+   * The database name, without the "SQLite.db" suffix, exactly as createConnection takes it
+   */
+  database: string;
+  /**
+   * The bytes to import
+   */
+  source: capSQLiteImportSource;
+  /**
+   * Replace an existing database of that name.
+   * Absent or "false" rejects when the name is already taken.
+   * An overwrite briefly needs room for three copies of the database: the old one, the staged
+   * import and the copy being written into place.
+   */
+  overwrite?: boolean;
+  /**
+   * Total byte length, for progress reporting when the source cannot report its own.
+   * A ReadableStream never knows its length; a Blob and a Uint8Array always do.
+   */
+  totalBytes?: number;
+}
+
+export interface capSQLiteImportDatabaseResult {
+  /**
+   * The database that was imported
+   */
+  database: string;
+  /**
+   * Bytes read from the source
+   */
+  bytes: number;
+  /**
+   * "true" when an existing database of that name was replaced
+   */
+  replaced: boolean;
+}
+
+/**
+ * Progress for importDatabase, raised as the "sqliteImportDatabaseProgressEvent" event.
+ */
+export interface capSQLiteImportDatabaseProgress {
+  database: string;
+  /**
+   * Which part of the import is running: streaming the bytes in, verifying what arrived,
+   * publishing it under the database name, or finished.
+   */
+  phase: 'streaming' | 'verifying' | 'publishing' | 'done';
+  /**
+   * Bytes read from the source so far
+   */
+  loaded: number;
+  /**
+   * Total bytes, when the size is knowable
+   */
+  total?: number;
+}
+
+export interface capWebStoreInfo {
+  /**
+   * 1 when databases are files in the Origin Private File System,
+   * 2 when they are whole-file images in IndexedDB
+   */
+  tier: 1 | 2;
+  /**
+   * Where the bytes rest
+   */
+  persistence: 'opfs' | 'indexeddb';
+  /**
+   * The SQLite library version the engine reports
+   */
+  sqliteVersion: string;
+  /**
+   * The VFS pool name. Part of the on-disk contract: changing it orphans stored databases.
+   */
+  poolName: string;
+  /**
+   * The OPFS directory holding the pool
+   */
+  directory: string;
+  /**
+   * Why tier 2 was selected. Absent on tier 1.
+   */
+  fallbackReason?: string;
+  /**
+   * Origin storage quota in bytes.
+   * Absent where navigator.storage.estimate is not implemented, iOS 16.4 among them.
+   */
+  quota?: number;
+  /**
+   * Origin storage usage in bytes. Absent under the same conditions as "quota".
+   */
+  usage?: number;
+}
+
 export interface capSQLiteHTTPOptions {
   /**
    * The url of the database or the zipped database(s)
@@ -1104,6 +1240,27 @@ export interface ISQLiteConnection {
    */
   saveToLocalDisk(database: string): Promise<void>;
   /**
+   * Import a database from bytes the caller supplies (Web only)
+   * @param database
+   * @param source Uint8Array, Blob or ReadableStream
+   * @param overwrite replace an existing database of that name
+   * @param totalBytes total length, for progress when the source cannot report its own
+   * @returns Promise<capSQLiteImportDatabaseResult>
+   * @since 8.2.0
+   */
+  importDatabase(
+    database: string,
+    source: capSQLiteImportSource,
+    overwrite?: boolean,
+    totalBytes?: number,
+  ): Promise<capSQLiteImportDatabaseResult>;
+  /**
+   * Report how the web store is persisting data, and how much room it has (Web only)
+   * @returns Promise<capWebStoreInfo>
+   * @since 8.2.0
+   */
+  getWebStoreInfo(): Promise<capWebStoreInfo>;
+  /**
    * Echo a value
    * @param value
    * @returns Promise<capEchoResult>
@@ -1383,6 +1540,32 @@ export class SQLiteConnection implements ISQLiteConnection {
       return Promise.reject(err);
     }
   }
+  async importDatabase(
+    database: string,
+    source: capSQLiteImportSource,
+    overwrite?: boolean,
+    totalBytes?: number,
+  ): Promise<capSQLiteImportDatabaseResult> {
+    try {
+      return await this.sqlite.importDatabase({
+        database,
+        source,
+        overwrite: overwrite ?? false,
+        ...(totalBytes !== undefined ? { totalBytes } : {}),
+      });
+    } catch (err) {
+      throw new Error(`${err}`);
+    }
+  }
+
+  async getWebStoreInfo(): Promise<capWebStoreInfo> {
+    try {
+      return await this.sqlite.getWebStoreInfo();
+    } catch (err) {
+      throw new Error(`${err}`);
+    }
+  }
+
   async getFromLocalDiskToStore(overwrite?: boolean): Promise<void> {
     const mOverwrite: boolean = overwrite != null ? overwrite : true;
 
