@@ -36,462 +36,373 @@ import type {
   capSQLiteExtensionPath,
   capSQLiteExtensionEnable,
 } from './definitions';
+import { WorkerClient } from './web/client';
+import { WEBSTORE_NOT_OPEN, prefixed } from './web/errors';
+import type { SerializedUpgrade, Tier, WorkerInitResult } from './web/protocol';
+import { ConnectionRegistry, parseKey, reconcile } from './web/registry';
+import { connKey } from './web/worker/paths';
+import { getSqliteWebOptions } from './web/worker-factory';
 
+/**
+ * Web implementation backed by `@sqlite.org/sqlite-wasm` in a dedicated worker.
+ *
+ * Tier 1 stores databases in OPFS through the `opfs-sahpool` VFS, which needs neither COOP/COEP
+ * headers nor SharedArrayBuffer and therefore works inside Capacitor WebViews. Tier 2 is the
+ * automatic fallback for platforms without OPFS sync access handles: the same engine, with
+ * databases in `:memory:` and whole-file images in IndexedDB.
+ */
 export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlugin {
-  private jeepSqliteElement: any = null;
-  private isWebStoreOpen = false;
+  private client = new WorkerClient();
+  private registry = new ConnectionRegistry();
+  private upgrades = new Map<string, SerializedUpgrade[]>();
+  private store: WorkerInitResult | null = null;
 
   async initWebStore(): Promise<void> {
-    await customElements.whenDefined('jeep-sqlite');
-
-    this.jeepSqliteElement = document.querySelector('jeep-sqlite');
-    this.ensureJeepSqliteIsAvailable();
-
-    this.jeepSqliteElement.addEventListener('jeepSqliteImportProgress', (event: CustomEvent) => {
-      this.notifyListeners('sqliteImportProgressEvent', event.detail);
-    });
-    this.jeepSqliteElement.addEventListener('jeepSqliteExportProgress', (event: CustomEvent) => {
-      this.notifyListeners('sqliteExportProgressEvent', event.detail);
-    });
-    this.jeepSqliteElement.addEventListener('jeepSqliteHTTPRequestEnded', (event: CustomEvent) => {
-      this.notifyListeners('sqliteHTTPRequestEndedEvent', event.detail);
-    });
-    this.jeepSqliteElement.addEventListener('jeepSqlitePickDatabaseEnded', (event: CustomEvent) => {
-      this.notifyListeners('sqlitePickDatabaseEndedEvent', event.detail);
-    });
-    this.jeepSqliteElement.addEventListener('jeepSqliteSaveDatabaseToDisk', (event: CustomEvent) => {
-      this.notifyListeners('sqliteSaveDatabaseToDiskEvent', event.detail);
-    });
-
-    if (!this.isWebStoreOpen) {
-      this.isWebStoreOpen = await this.jeepSqliteElement.isStoreOpen();
+    if (this.store) return;
+    try {
+      await this.client.start();
+      this.store = await this.client.call('init', getSqliteWebOptions());
+    } catch (err) {
+      this.store = null;
+      throw prefixed('initWebStore', err);
     }
-
-    return;
   }
 
-  async saveToStore(options: capSQLiteOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      await this.jeepSqliteElement.saveToStore(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+  /** Which durability tier the store selected. Additive; not part of CapacitorSQLitePlugin. */
+  getWebStoreTier(): Tier | null {
+    return this.store?.tier ?? null;
   }
-  async getFromLocalDiskToStore(options: capSQLiteLocalDiskOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
 
-    try {
-      await this.jeepSqliteElement.getFromLocalDiskToStore(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+  /**
+   * Shut the worker down and release the single-owner lock, so another tab can take over.
+   * Additive; not part of CapacitorSQLitePlugin. Any open connection is dropped without a
+   * flush, so call `saveToStore` first if you are on tier 2 and care about unsaved changes.
+   */
+  async closeWebStore(): Promise<void> {
+    this.client.terminate();
+    this.registry.clear();
+    this.store = null;
   }
-  async saveToLocalDisk(options: capSQLiteOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
 
-    try {
-      await this.jeepSqliteElement.saveToLocalDisk(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
+  private ensureStore(): WorkerInitResult {
+    if (!this.store) throw new Error(WEBSTORE_NOT_OPEN);
+    return this.store;
+  }
+
+  private static optionValue<T>(options: any, key: string, fallback?: T): T {
+    const value = options?.[key];
+    if (value === undefined || value === null) {
+      if (fallback !== undefined) return fallback;
+      throw new Error(`Must provide a ${key}`);
     }
+    return value as T;
+  }
+
+  private call(op: string, args: Record<string, any>, database?: string, readonly?: boolean): Promise<any> {
+    this.ensureStore();
+    const key = database !== undefined ? connKey(database, !!readonly) : undefined;
+    return this.client.call(op, args, key);
   }
 
   async echo(options: capEchoOptions): Promise<capEchoResult> {
-    this.ensureJeepSqliteIsAvailable();
+    return { value: options?.value };
+  }
 
-    const echoResult = await this.jeepSqliteElement.echo(options);
-    return echoResult;
+  async saveToStore(options: capSQLiteOptions): Promise<void> {
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    await this.call('saveToStore', { database }, database, false);
   }
 
   async createConnection(options: capConnectionOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
+    this.ensureStore();
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const version = options.version ?? 1;
+    const readonly = options.readonly ?? false;
+    if (options.encrypted) {
+      throw new Error('CreateConnection: encryption is not supported on the web platform');
+    }
+    this.registry.add(database, readonly, version);
+  }
 
+  async closeConnection(options: capSQLiteOptions): Promise<void> {
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    this.registry.require(database, readonly);
     try {
-      await this.jeepSqliteElement.createConnection(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
+      await this.call('close', { database, readonly }, database, readonly);
+    } finally {
+      this.registry.delete(database, readonly);
+      this.client.releaseQueue(connKey(database, readonly));
     }
   }
 
   async open(options: capSQLiteOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    const entry = this.registry.require(database, readonly);
     try {
-      await this.jeepSqliteElement.open(options);
-      return;
+      await this.call(
+        'open',
+        { database, readonly, version: entry.version, upgrades: this.upgrades.get(database) ?? [] },
+        database,
+        readonly,
+      );
+      entry.isOpen = true;
     } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async closeConnection(options: capSQLiteOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      await this.jeepSqliteElement.closeConnection(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async getVersion(options: capSQLiteOptions): Promise<capVersionResult> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const versionResult: capVersionResult = await this.jeepSqliteElement.getVersion(options);
-      return versionResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async checkConnectionsConsistency(options: capAllConnectionsOptions): Promise<capSQLiteResult> {
-    this.ensureJeepSqliteIsAvailable();
-
-    try {
-      const consistencyResult: capSQLiteResult = await this.jeepSqliteElement.checkConnectionsConsistency(options);
-      return consistencyResult;
-    } catch (err) {
-      throw new Error(`${err}`);
+      throw prefixed('Open', err);
     }
   }
 
   async close(options: capSQLiteOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      await this.jeepSqliteElement.close(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    const entry = this.registry.require(database, readonly);
+    await this.call('close', { database, readonly }, database, readonly);
+    entry.isOpen = false;
   }
-  async beginTransaction(options: capSQLiteOptions): Promise<capSQLiteChanges> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
 
-    try {
-      const changes: capSQLiteChanges = await this.jeepSqliteElement.beginTransaction(options);
-      return changes;
-    } catch (err) {
-      throw new Error(`${err}`);
+  async getVersion(options: capSQLiteOptions): Promise<capVersionResult> {
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    this.requireOpen(database, readonly, 'GetVersion');
+    return this.call('getVersion', { database, readonly }, database, readonly);
+  }
+
+  async checkConnectionsConsistency(options: capAllConnectionsOptions): Promise<capSQLiteResult> {
+    const dbNames = options?.dbNames ?? [];
+    const openModes = options?.openModes ?? [];
+    const claimed = dbNames.map((name, index) => `${openModes[index] ?? 'RW'}_${name}`);
+    const { toClose, consistent } = reconcile(this.registry.keys(), claimed);
+
+    for (const key of toClose) {
+      const { database, readonly } = parseKey(key);
+      try {
+        await this.call('close', { database, readonly }, database, readonly);
+      } catch {
+        // A connection that cannot be closed is still one we must forget about.
+      }
+      this.registry.delete(database, readonly);
+      this.client.releaseQueue(key);
     }
+    if (!consistent) this.registry.clear();
+    return { result: consistent };
+  }
+
+  async beginTransaction(options: capSQLiteOptions): Promise<capSQLiteChanges> {
+    return this.transactionOp('beginTransaction', options);
   }
   async commitTransaction(options: capSQLiteOptions): Promise<capSQLiteChanges> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const changes: capSQLiteChanges = await this.jeepSqliteElement.commitTransaction(options);
-      return changes;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    return this.transactionOp('commitTransaction', options);
   }
   async rollbackTransaction(options: capSQLiteOptions): Promise<capSQLiteChanges> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const changes: capSQLiteChanges = await this.jeepSqliteElement.rollbackTransaction(options);
-      return changes;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    return this.transactionOp('rollbackTransaction', options);
   }
-  async isTransactionActive(options: capSQLiteOptions): Promise<capSQLiteResult> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
 
-    try {
-      const result: capSQLiteResult = await this.jeepSqliteElement.isTransactionActive(options);
-      return result;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+  private async transactionOp(op: string, options: capSQLiteOptions): Promise<capSQLiteChanges> {
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    this.requireOpen(database, readonly, op);
+    const result = await this.call(op, { database, readonly }, database, readonly);
+    return { changes: { changes: result.changes, lastId: result.lastId } };
+  }
+
+  async isTransactionActive(options: capSQLiteOptions): Promise<capSQLiteResult> {
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    this.requireOpen(database, readonly, 'IsTransactionActive');
+    return this.call('isTransactionActive', { database, readonly }, database, readonly);
   }
 
   async getTableList(options: capSQLiteOptions): Promise<capSQLiteValues> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const tableListResult: capSQLiteValues = await this.jeepSqliteElement.getTableList(options);
-      return tableListResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    this.requireOpen(database, readonly, 'GetTableList');
+    return this.call('getTableList', { database, readonly }, database, readonly);
   }
 
   async execute(options: capSQLiteExecuteOptions): Promise<capSQLiteChanges> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const executeResult: capSQLiteChanges = await this.jeepSqliteElement.execute(options);
-      return executeResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const statements = CapacitorSQLiteWeb.optionValue<string>(options, 'statements');
+    const transaction = options.transaction ?? true;
+    this.rejectReadonly(options.readonly, 'Execute');
+    this.requireOpen(database, false, 'Execute');
+    const result = await this.call('execute', { database, readonly: false, statements, transaction }, database, false);
+    return { changes: { changes: result.changes, lastId: result.lastId } };
   }
 
   async executeSet(options: capSQLiteSetOptions): Promise<capSQLiteChanges> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const executeResult: capSQLiteChanges = await this.jeepSqliteElement.executeSet(options);
-      return executeResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const set = CapacitorSQLiteWeb.optionValue<any[]>(options, 'set');
+    const transaction = options.transaction ?? true;
+    const returnMode = options.returnMode ?? 'no';
+    this.rejectReadonly(options.readonly, 'ExecuteSet');
+    this.requireOpen(database, false, 'ExecuteSet');
+    const result = await this.call(
+      'executeSet',
+      { database, readonly: false, set, transaction, returnMode },
+      database,
+      false,
+    );
+    return { changes: CapacitorSQLiteWeb.changesOf(result) };
   }
 
   async run(options: capSQLiteRunOptions): Promise<capSQLiteChanges> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const runResult: capSQLiteChanges = await this.jeepSqliteElement.run(options);
-      return runResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const statement = CapacitorSQLiteWeb.optionValue<string>(options, 'statement');
+    const transaction = options.transaction ?? true;
+    const returnMode = options.returnMode ?? 'no';
+    this.rejectReadonly(options.readonly, 'Run');
+    this.requireOpen(database, false, 'Run');
+    const result = await this.call(
+      'run',
+      { database, readonly: false, statement, values: options.values ?? [], transaction, returnMode },
+      database,
+      false,
+    );
+    return { changes: CapacitorSQLiteWeb.changesOf(result) };
   }
+
   async query(options: capSQLiteQueryOptions): Promise<capSQLiteValues> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const queryResult: capSQLiteValues = await this.jeepSqliteElement.query(options);
-      return queryResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const statement = CapacitorSQLiteWeb.optionValue<string>(options, 'statement');
+    const readonly = options.readonly ?? false;
+    this.requireOpen(database, readonly, 'Query');
+    return this.call('query', { database, readonly, statement, values: options.values ?? [] }, database, readonly);
   }
-  async isDBExists(options: capSQLiteOptions): Promise<capSQLiteResult> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
 
-    try {
-      const dbExistsResult: capSQLiteResult = await this.jeepSqliteElement.isDBExists(options);
-      return dbExistsResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+  async isDBExists(options: capSQLiteOptions): Promise<capSQLiteResult> {
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    this.registry.require(database, readonly);
+    return this.call('isDatabase', { database });
   }
 
   async isDBOpen(options: capSQLiteOptions): Promise<capSQLiteResult> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const isDBOpenResult: capSQLiteResult = await this.jeepSqliteElement.isDBOpen(options);
-      return isDBOpenResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    this.registry.require(database, readonly);
+    return this.call('isDBOpen', { database, readonly });
   }
 
   async isDatabase(options: capSQLiteOptions): Promise<capSQLiteResult> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const isDatabaseResult: capSQLiteResult = await this.jeepSqliteElement.isDatabase(options);
-      return isDatabaseResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    return this.call('isDatabase', { database });
   }
 
   async isTableExists(options: capSQLiteTableOptions): Promise<capSQLiteResult> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const tableExistsResult = await this.jeepSqliteElement.isTableExists(options);
-      return tableExistsResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const table = CapacitorSQLiteWeb.optionValue<string>(options, 'table');
+    const readonly = options.readonly ?? false;
+    this.requireOpen(database, readonly, 'IsTableExists');
+    return this.call('isTableExists', { database, readonly, table }, database, readonly);
   }
+
   async deleteDatabase(options: capSQLiteOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      await this.jeepSqliteElement.deleteDatabase(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-  async isJsonValid(options: capSQLiteImportOptions): Promise<capSQLiteResult> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const isJsonValidResult = await this.jeepSqliteElement.isJsonValid(options);
-      return isJsonValidResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async importFromJson(options: capSQLiteImportOptions): Promise<capSQLiteChanges> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const importFromJsonResult: capSQLiteChanges = await this.jeepSqliteElement.importFromJson(options);
-      return importFromJsonResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async exportToJson(options: capSQLiteExportOptions): Promise<capSQLiteJson> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const exportToJsonResult: capSQLiteJson = await this.jeepSqliteElement.exportToJson(options);
-      return exportToJsonResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-  async createSyncTable(options: capSQLiteOptions): Promise<capSQLiteChanges> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const createSyncTableResult: capSQLiteChanges = await this.jeepSqliteElement.createSyncTable(options);
-      return createSyncTableResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async setSyncDate(options: capSQLiteSyncDateOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-    try {
-      await this.jeepSqliteElement.setSyncDate(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async getSyncDate(options: capSQLiteOptions): Promise<capSQLiteSyncDate> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const getSyncDateResult: capSQLiteSyncDate = await this.jeepSqliteElement.getSyncDate(options);
-      return getSyncDateResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-  async deleteExportedRows(options: capSQLiteOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-    try {
-      await this.jeepSqliteElement.deleteExportedRows(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async addUpgradeStatement(options: capSQLiteUpgradeOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      await this.jeepSqliteElement.addUpgradeStatement(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async copyFromAssets(options: capSQLiteFromAssetsOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      await this.jeepSqliteElement.copyFromAssets(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
-  }
-
-  async getFromHTTPRequest(options: capSQLiteHTTPOptions): Promise<void> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      await this.jeepSqliteElement.getFromHTTPRequest(options);
-      return;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    this.rejectReadonly(options.readonly, 'DeleteDatabase');
+    this.registry.require(database, false);
+    await this.call('deleteDatabase', { database }, database, false);
+    const entry = this.registry.get(database, false);
+    if (entry) entry.isOpen = false;
   }
 
   async getDatabaseList(): Promise<capSQLiteValues> {
-    this.ensureJeepSqliteIsAvailable();
-    this.ensureWebstoreIsOpen();
-
-    try {
-      const databaseListResult: capSQLiteValues = await this.jeepSqliteElement.getDatabaseList();
-      return databaseListResult;
-    } catch (err) {
-      throw new Error(`${err}`);
-    }
+    return this.call('getDatabaseList', {});
   }
 
-  /**
-   * Checks if the `jeep-sqlite` element is present in the DOM.
-   * If it's not in the DOM, this method throws an Error.
-   *
-   * Attention: This will always fail, if the `intWebStore()` method wasn't called before.
-   */
-  private ensureJeepSqliteIsAvailable() {
-    if (this.jeepSqliteElement === null) {
-      throw new Error(
-        `The jeep-sqlite element is not present in the DOM! Please check the @capacitor-community/sqlite documentation for instructions regarding the web platform.`,
-      );
-    }
+  async addUpgradeStatement(options: capSQLiteUpgradeOptions): Promise<void> {
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const upgrade = CapacitorSQLiteWeb.optionValue<any[]>(options, 'upgrade');
+    const serialized: SerializedUpgrade[] = upgrade.map((entry, index) => {
+      if (entry?.toVersion === undefined || !Array.isArray(entry?.statements)) {
+        throw new Error(`AddUpgradeStatement: upgrade[${index}] needs toVersion and statements`);
+      }
+      return { toVersion: entry.toVersion, statements: entry.statements };
+    });
+    const existing = this.upgrades.get(database) ?? [];
+    const merged = new Map<number, SerializedUpgrade>();
+    for (const item of [...existing, ...serialized]) merged.set(item.toVersion, item);
+    this.upgrades.set(
+      database,
+      [...merged.values()].sort((a, b) => a.toVersion - b.toVersion),
+    );
   }
 
-  private ensureWebstoreIsOpen() {
-    if (!this.isWebStoreOpen) {
-      /**
-       * if (!this.isWebStoreOpen)
-        this.isWebStoreOpen = await this.jeepSqliteElement.isStoreOpen();
-       */
-      throw new Error('WebStore is not open yet. You have to call "initWebStore()" first.');
-    }
+  private requireOpen(database: string, readonly: boolean, context: string): void {
+    const entry = this.registry.require(database, readonly);
+    if (!entry.isOpen) throw new Error(`${context}: Database ${database} not opened`);
+  }
+
+  private rejectReadonly(readonly: boolean | undefined, context: string): void {
+    if (readonly) throw new Error(`${context}: not allowed in read-only mode`);
+  }
+
+  private static changesOf(result: any): { changes: number; lastId: number; values?: any[] } {
+    const changes: { changes: number; lastId: number; values?: any[] } = {
+      changes: result.changes,
+      lastId: result.lastId,
+    };
+    if (result.values !== undefined) changes.values = result.values;
+    return changes;
+  }
+
+  ////////////////////////////////////
+  ////// NOT YET PORTED TO THE NEW ENGINE
+  ////////////////////////////////////
+
+  async getFromLocalDiskToStore(options: capSQLiteLocalDiskOptions): Promise<void> {
+    console.log('getFromLocalDiskToStore', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async saveToLocalDisk(options: capSQLiteOptions): Promise<void> {
+    console.log('saveToLocalDisk', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async isJsonValid(options: capSQLiteImportOptions): Promise<capSQLiteResult> {
+    console.log('isJsonValid', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async importFromJson(options: capSQLiteImportOptions): Promise<capSQLiteChanges> {
+    console.log('importFromJson', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async exportToJson(options: capSQLiteExportOptions): Promise<capSQLiteJson> {
+    console.log('exportToJson', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async createSyncTable(options: capSQLiteOptions): Promise<capSQLiteChanges> {
+    console.log('createSyncTable', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async setSyncDate(options: capSQLiteSyncDateOptions): Promise<void> {
+    console.log('setSyncDate', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async getSyncDate(options: capSQLiteOptions): Promise<capSQLiteSyncDate> {
+    console.log('getSyncDate', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async deleteExportedRows(options: capSQLiteOptions): Promise<void> {
+    console.log('deleteExportedRows', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async copyFromAssets(options: capSQLiteFromAssetsOptions): Promise<void> {
+    console.log('copyFromAssets', options);
+    throw this.unimplemented('Not implemented on web.');
+  }
+
+  async getFromHTTPRequest(options: capSQLiteHTTPOptions): Promise<void> {
+    console.log('getFromHTTPRequest', options);
+    throw this.unimplemented('Not implemented on web.');
   }
 
   ////////////////////////////////////
@@ -578,10 +489,12 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   async isInConfigBiometricAuth(): Promise<capSQLiteResult> {
     throw this.unimplemented('Not implemented on web.');
   }
+
   async loadExtension(options: capSQLiteExtensionPath): Promise<void> {
     console.log('loadExtension', options);
     throw this.unimplemented('Not implemented on web.');
   }
+
   async enableLoadExtension(options: capSQLiteExtensionEnable): Promise<void> {
     console.log('enableLoadExtension', options);
     throw this.unimplemented('Not implemented on web.');
