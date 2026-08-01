@@ -52,7 +52,29 @@
   one with `PRAGMA integrity_check`, and only then retires the legacy store. If anything fails,
   nothing is deleted and a warning naming the database is written to the console.
 
-  Three behaviour changes worth knowing:
+  Two things happen for you, once each, at `initWebStore`:
+
+   - Databases left in the IndexedDB fallback store by an older browser are moved into OPFS as
+     soon as the browser supports it. Without that an engine update, which is exactly what a
+     tier 2 user is waiting for, would leave them looking at an empty store.
+   - Databases from the previous `jeep-sqlite` store are imported, as described above.
+
+  Under Capacitor native the store now follows the app in and out of the background: every
+  connection is closed and the VFS paused before the OS suspends the app, then reopened on
+  return, because WKWebView invalidates OPFS access handles across a suspension. If the gentle
+  path cannot run, the worker is restarted and the connections reopened from a fresh one.
+  `pauseWebStore()`, `resumeWebStore()` and `restartWebStore()` are available if you would rather
+  drive it from `App.appStateChange` yourself.
+
+  Four behaviour changes worth knowing:
+
+   - Foreign keys are enforced. `PRAGMA foreign_keys` is set ON at open, as it already was on
+     every other platform of this plugin. A schema that was quietly violating its own constraints
+     on the web will start saying so.
+   - A soft delete now follows foreign keys. When a database participates in sync, deleting a
+     parent applies each referencing constraint's `ON DELETE` action to the children, and to
+     their children, so an export no longer tells the server a parent is gone while reporting its
+     children live.
 
    - Read-only connections (`readonly: true`) now work on Web.
    - Integers above 2^53 come back as `BigInt` rather than a silently truncated number.

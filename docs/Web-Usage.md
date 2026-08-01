@@ -28,6 +28,7 @@ imports any database left behind by the previous `jeep-sqlite` implementation.
 
 * [`Requirements and browser support`](#requirements-and-browser-support)
 * [`Durability tiers`](#durability-tiers)
+* [`Backgrounding under Capacitor`](#backgrounding-under-capacitor)
 * [`Serving the worker and the wasm`](#serving-the-worker-and-the-wasm)
 * [`Migrating from jeep-sqlite`](#migrating-from-jeep-sqlite)
 * [`Limitations`](#limitations)
@@ -85,6 +86,39 @@ and on tier 1 there is nothing for it to do.
 Only one browsing context may own the store, because OPFS access handles are single-owner by
 design. If another tab of the same origin already holds it, `initWebStore()` rejects with an
 explicit error rather than quietly opening an empty database over your data.
+
+**Tier 2 is not a one-way door.** A browser that lacked OPFS sync access handles and later gains
+them, which is the normal update path for the devices that land on tier 2, would otherwise select
+tier 1 and find an empty pool while the data sat in IndexedDB. Each `initWebStore()` on tier 1
+therefore moves any image left in the fallback store into the pool, verifies it, and only then
+removes the original. Nothing is deleted until its replacement has been read back, so an
+interrupted move resumes on the next start and a browser that drops back to tier 2 still finds
+whatever has not moved yet.
+
+## Backgrounding under Capacitor
+
+WKWebView invalidates OPFS access handles when the OS suspends the app, so the store cannot simply
+be left open across a background. When the plugin detects a native Capacitor platform it follows
+the app itself: on the way out it closes every connection and pauses the VFS, and on the way back
+it unpauses and reopens what it closed. A transaction open at that moment cannot survive the
+close; it is rolled back and reported on the console rather than silently abandoned.
+
+If the gentle path cannot run, which is what a long suspension can do to a pool behind the
+plugin's back, the worker is torn down and a fresh one takes the pool over, then reopens the same
+connections. This is the recovery path, and it is why a suspension does not end in a dead store.
+
+Three methods are exported for apps that would rather drive this from `App.appStateChange`, which
+is more precise than the visibility signal the plugin uses on its own. They are safe to call in
+addition to the automatic wiring, since all three are idempotent:
+
+```ts
+await (CapacitorSQLite as any).pauseWebStore();    // close everything, pause the VFS
+await (CapacitorSQLite as any).resumeWebStore();   // unpause and reopen, restarting if needed
+await (CapacitorSQLite as any).restartWebStore();  // the heavy path on its own
+```
+
+On the plain web none of this is wired up: a browser tab going hidden is not a suspension, and
+closing every connection on a tab switch would be a bug rather than a protection.
 
 ## Serving the worker and the wasm
 
@@ -147,6 +181,16 @@ The databases keep their names, so no application code changes.
   `isInConfigEncryption` and `isInConfigBiometricAuth`.
 - **No WAL.** `opfs-sahpool` has no shared-memory support, so tier 1 stays on the `delete` journal
   and a `PRAGMA journal_mode=WAL` is silently refused. Tier 2 runs on the `memory` journal.
+- **Foreign keys are enforced.** `PRAGMA foreign_keys` is ON from the moment a database is opened,
+  which matches every other platform of this plugin. If your schema declares constraints it was
+  quietly violating on the old web engine, they will now be reported.
+- **The soft-delete cascade needs rowids.** On a database that participates in sync, a DELETE is
+  recorded rather than performed, so sqlite never runs the `ON DELETE` actions itself and the
+  plugin applies them instead. It identifies affected rows by `rowid`, so a `WITHOUT ROWID` table
+  on the receiving end of a constraint with an `ON DELETE` action is reported as an error rather
+  than skipped. A referencing table that has no `sql_deleted` column is left alone: there is
+  nothing to mark, the parent row physically remains, and sqlite runs the real action later when
+  `deleteExportedRows` performs the actual delete.
 - **Integers above 2^53 come back as `BigInt`.** This is a correctness improvement over the
   previous engine, which silently lost precision, but `JSON.stringify` throws a `TypeError` on a
   `BigInt`. Use `exportToJson`, which encodes out-of-range integers as decimal strings that SQLite

@@ -133,6 +133,9 @@ There are two separate floors, and they mean different things:
 
 - **One tab at a time.** OPFS access handles are single-owner by design, so `initWebStore()` fails with an explicit error if another tab of the same origin already owns the store.
 - **Migration is automatic.** The first `initWebStore()` after upgrading imports every database left behind by the previous `jeep-sqlite`/IndexedDB implementation, verifies each one with `PRAGMA integrity_check`, and only then retires the old store. A failure leaves the old data untouched and warns on the console.
+- **Tier 2 databases follow you up to tier 1.** When a browser that lacked OPFS gains it, which is the normal upgrade path for the devices that run on tier 2, `initWebStore()` moves the stored images into OPFS and only then removes them.
+- **Foreign keys are enforced**, as on every other platform. On a database that participates in sync, a soft delete also applies each constraint's `ON DELETE` action to the children, and to their children.
+- **Backgrounding is handled** under Capacitor native: the store is closed and paused before the OS suspends the app, and reopened on return. `pauseWebStore()`, `resumeWebStore()` and `restartWebStore()` are there if you would rather drive it from `App.appStateChange`.
 - **Integers above 2^53 are returned as `BigInt`.** The previous web engine silently lost precision on those. `JSON.stringify` refuses to serialise a `BigInt`, so code that stringifies query results may need `exportToJson`, which handles this, or a replacer.
 - **No encryption.** There is no SQLCipher build for wasm, so encrypted connections and every secret-related method still reject on Web.
 - **Read-only connections work on Web**, on both tiers.
