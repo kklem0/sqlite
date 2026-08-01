@@ -13,6 +13,36 @@ export const MULTI_TAB_LOCKED =
   'Database is open in another tab or window. @capacitor-community/sqlite supports a single ' +
   'owning context per origin on the web; close the other tab and retry.';
 
+/**
+ * A worker that fails to load has two very different causes, and telling them apart is the
+ * difference between a five-minute bundler fix and an unsupported browser.
+ *
+ * A parse failure means the engine is below the floor documented in docs/Web-Usage.md: the
+ * shipped worker and `@sqlite.org/sqlite-wasm` inside it are ES2020, and BigInt is a runtime
+ * dependency of int64 that no transpiler can supply. Anything else is almost always the bundler
+ * failing to serve `dist/web-worker.js` or `dist/sqlite3.wasm`.
+ *
+ * The raw browser message is always appended: a guess that hides the evidence is worse than no
+ * guess at all.
+ */
+export function workerLoadFailure(raw: string): SQLiteWebError {
+  const detail = raw && raw.trim().length > 0 ? raw.trim() : 'no further detail from the browser';
+  if (/SyntaxError|Unexpected (token|identifier|end of input)/i.test(detail)) {
+    return new SQLiteWebError(
+      'The SQLite worker could not be parsed by this browser, which means it is below the minimum ' +
+        'this plugin supports (Chrome/Android WebView 80, Safari 14, Firefox 74). This cannot be ' +
+        `fixed by changing your build target. Browser reported: ${detail}`,
+      { name: 'SQLiteWebUnsupportedEngineError', code: 'UNSUPPORTED_ENGINE' },
+    );
+  }
+  return new SQLiteWebError(
+    'The SQLite worker failed to load. Check that your bundler serves dist/web-worker.js and ' +
+      'dist/sqlite3.wasm, or supply your own worker with setSqliteWorkerFactory(). ' +
+      `Browser reported: ${detail}`,
+    { name: 'SQLiteWebWorkerLoadError', code: 'WORKER_LOAD_FAILED' },
+  );
+}
+
 export class SQLiteWebError extends Error {
   readonly code?: string;
 
