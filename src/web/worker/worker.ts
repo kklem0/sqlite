@@ -11,13 +11,26 @@ import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 
 import { toErrorPayload } from '../errors';
 import type { ExecResult, OpenArgs, WorkerInitArgs, WorkerInitResult, WorkerRequest } from '../protocol';
-import { BOOT_ID, EVENT_ID, EV_EXPORT_PROGRESS, EV_IMPORT_PROGRESS } from '../protocol';
+import { BOOT_ID, EVENT_ID, EV_EXPORT_PROGRESS, EV_IMPORT_DATABASE_PROGRESS, EV_IMPORT_PROGRESS } from '../protocol';
 
 import type { AdoptionTarget } from './adoption';
 import type { AssetTarget } from './assets';
 import { copyFromAssets, getFromHTTPRequest } from './assets';
 import { Connection, wantsRows } from './engine';
 import { ImageStore, deserializeInto } from './images';
+import type { ImportTarget, SwapMarker } from './import-database';
+import {
+  ChunkPuller,
+  IMPORT_IN_PROGRESS,
+  IMPORT_NAME_TAKEN,
+  IMPORT_TRANSACTION_ACTIVE,
+  SWAP_MARKER,
+  importError,
+  isStagingName,
+  requireSQLiteHeader,
+  stageAndVerify,
+  stagingName,
+} from './import-database';
 import { exportJson } from './json/export';
 import { importJson } from './json/import';
 import { isJsonSQLite, parseJsonSQLite } from './json/validate';
@@ -45,7 +58,23 @@ let poolUtil: any = null;
 let tier: 1 | 2 = 2;
 /** Constructed at init, because its IndexedDB name is derived from the configured pool name. */
 let images = new ImageStore('capacitor-sqlite');
+let options: WorkerInitArgs = { poolName: 'capacitor-sqlite', directory: '.capacitor-sqlite' };
 const connections = new Map<string, Connection>();
+
+/**
+ * The two gates from PLAN 16.4. `importing` is held for a whole import so a second one for the
+ * same name is refused; `publishing` is held only across the destructive window so no other op can
+ * address a name whose file is being replaced. Streaming deliberately does not gate the target:
+ * nothing has touched it yet, so reads of the database being replaced keep working until publish.
+ */
+const importing = new Set<string>();
+const publishing = new Set<string>();
+
+function refuseWhilePublishing(database: string): void {
+  if (publishing.has(storageName(database))) {
+    throw importError(IMPORT_IN_PROGRESS, `Database ${database} is being replaced by an import`);
+  }
+}
 
 function requireInit(): void {
   if (!sqlite3) throw new Error('The SQLite worker is not initialised.');
@@ -112,6 +141,127 @@ function adoptionTarget(): AdoptionTarget {
 }
 
 /**
+ * The tier-specific half of `importDatabase`.
+ *
+ * Tier 1 streams through `importDb`'s async-callback form, so the pulled chunk is the only copy in
+ * flight, and publishes with `VACUUM INTO`, which the pool's VFS handles page by page. Tier 2
+ * stores whole images by definition, so its chunks are concatenated and its publish is a `put`;
+ * streaming would buy nothing there, the same conclusion `assets.ts` reached.
+ */
+function importTarget(): ImportTarget {
+  return {
+    exists: async (storage) => {
+      if (tier === 1) return (poolUtil.getFileNames() as string[]).includes(poolPath(storage));
+      return images.has(storage);
+    },
+    stream: async (storage, puller, onProgress) => {
+      let loaded = 0;
+      let first = true;
+      const take = async (): Promise<Uint8Array | undefined> => {
+        const chunk = await puller.next();
+        if (!chunk || chunk.byteLength === 0) return undefined;
+        // Cheapest possible rejection of a stream that is not a database at all: the header is in
+        // the first chunk, so a wrong source never reaches sqlite.
+        if (first) {
+          requireSQLiteHeader(chunk);
+          first = false;
+        }
+        loaded += chunk.byteLength;
+        onProgress(loaded);
+        return chunk;
+      };
+      if (tier === 1) {
+        await reserveCapacity(poolUtil, 2);
+        await poolUtil.importDb(poolPath(storage), take);
+        return loaded;
+      }
+      const parts: Uint8Array[] = [];
+      for (;;) {
+        const chunk = await take();
+        if (!chunk) break;
+        parts.push(chunk);
+      }
+      const image = new Uint8Array(loaded);
+      let at = 0;
+      for (const part of parts) {
+        image.set(part, at);
+        at += part.byteLength;
+      }
+      await images.put(storage, image);
+      return loaded;
+    },
+    verify: async (storage) => {
+      const conn = tier === 1 ? openRaw(storage, false) : await openTier2(storage, false);
+      try {
+        const [row] = conn.query('PRAGMA integrity_check');
+        const verdict = row?.integrity_check;
+        if (verdict !== 'ok') throw new Error(`integrity_check returned ${verdict ?? 'nothing'}`);
+      } finally {
+        if (conn.isOpen) conn.close();
+      }
+    },
+    publish: async (from, to) => {
+      if (tier === 1) {
+        // VACUUM INTO refuses an existing destination and cannot run inside a transaction, both
+        // verified in PLAN 16.0 V2. The caller has already unlinked the target.
+        const conn = openRaw(from, false);
+        try {
+          conn.raw.exec(`VACUUM INTO '${poolPath(to).replace(/'/g, "''")}'`);
+        } finally {
+          if (conn.isOpen) conn.close();
+        }
+        return;
+      }
+      const image = await images.get(from);
+      if (!image) throw new Error(`the staged image for ${to} disappeared`);
+      await images.put(to, image);
+    },
+    remove: async (storage) => {
+      if (tier === 1) {
+        if ((poolUtil.getFileNames() as string[]).includes(poolPath(storage))) poolUtil.unlink(poolPath(storage));
+      } else {
+        await images.delete(storage);
+      }
+    },
+  };
+}
+
+/**
+ * Finish or undo a swap that a crash interrupted, and sweep staging files that no marker claims.
+ * Runs at init, before anything is opened. The marker is what makes an overwrite atomic across a
+ * process death rather than only within one call (PLAN 16.2).
+ */
+async function recoverInterruptedImports(): Promise<void> {
+  const target = importTarget();
+  let marker: SwapMarker | null = null;
+  try {
+    marker = await images.getMeta<SwapMarker>(SWAP_MARKER);
+  } catch {
+    marker = null;
+  }
+  if (marker) {
+    try {
+      const stagedPresent = await target.exists(marker.staging);
+      const targetPresent = await target.exists(marker.storage);
+      if (!targetPresent && stagedPresent) {
+        await target.verify(marker.staging);
+        await target.publish(marker.staging, marker.storage);
+      }
+    } catch {
+      // Leave the target as found. The staging file goes either way, below.
+    }
+    await target.remove(marker.staging).catch(() => undefined);
+    await images.setMeta(SWAP_MARKER, null).catch(() => undefined);
+  }
+
+  // Orphans with no marker: an import that died before the destructive window ever opened.
+  const names = tier === 1 ? (poolUtil.getFileNames() as string[]).map(fromPoolPath) : await images.keys();
+  for (const name of names) {
+    if (isStagingName(name)) await target.remove(name).catch(() => undefined);
+  }
+}
+
+/**
  * importFromJson names its own target database, which may or may not already be open. Reuse an
  * open read-write connection when there is one so the caller keeps seeing its own data, and
  * otherwise open a scratch connection and close it again.
@@ -175,8 +325,9 @@ async function flushIfTier2(conn: Connection): Promise<void> {
 }
 
 async function storedNames(): Promise<string[]> {
-  if (tier === 1) return (poolUtil.getFileNames() as string[]).map(fromPoolPath);
-  const names = new Set(await images.keys());
+  // Staging files are half-written imports, not databases, so no listing may show one.
+  if (tier === 1) return (poolUtil.getFileNames() as string[]).map(fromPoolPath).filter((n) => !isStagingName(n));
+  const names = new Set((await images.keys()).filter((n) => !isStagingName(n)));
   for (const conn of connections.values()) names.add(conn.storage);
   return [...names].sort();
 }
@@ -193,10 +344,15 @@ const ops: Record<string, (args: any) => any> = {
       });
     }
     images = new ImageStore(args.poolName);
+    options = args;
     const selection = await selectTier(sqlite3, args);
     tier = selection.tier;
     poolUtil = selection.poolUtil;
     if (tier === 1) await reserveCapacity(poolUtil, 4);
+
+    // Before promotion or migration: a leftover staging file is not a database and must never be
+    // seen as one, and an interrupted swap has to be settled before anything else touches storage.
+    await recoverInterruptedImports();
 
     // Both passes run before any connection is opened, so neither can race a live database.
     // Promotion goes first: an image in the fallback store is this app's own data from an earlier
@@ -215,6 +371,7 @@ const ops: Record<string, (args: any) => any> = {
 
   async open({ database, readonly, version, upgrades }: OpenArgs) {
     requireInit();
+    refuseWhilePublishing(database);
     const key = connKey(database, readonly);
     if (connections.has(key)) return { alreadyOpen: true };
     const storage = storageName(database);
@@ -345,6 +502,7 @@ const ops: Record<string, (args: any) => any> = {
     statement: string;
     values?: any[];
   }) {
+    refuseWhilePublishing(database);
     return { values: connection(database, readonly).query(statement, values) };
   },
 
@@ -377,6 +535,7 @@ const ops: Record<string, (args: any) => any> = {
 
   async isDatabase({ database }: { database: string }) {
     requireInit();
+    refuseWhilePublishing(database);
     const storage = storageName(database);
     if (tier === 1) return { result: (poolUtil.getFileNames() as string[]).includes(poolPath(storage)) };
     // On tier 1 a database exists from the moment it is opened. Tier 2 only writes its image at
@@ -401,6 +560,7 @@ const ops: Record<string, (args: any) => any> = {
 
   async deleteDatabase({ database }: { database: string }) {
     requireInit();
+    refuseWhilePublishing(database);
     const storage = storageName(database);
     for (const conn of connectionsFor(database)) {
       conn.close();
@@ -565,6 +725,105 @@ const ops: Record<string, (args: any) => any> = {
     }
     await target.adopt(storage, bytes);
     return { adopted: true, storage };
+  },
+
+  /**
+   * Take a caller-owned byte source and make it a database (PLAN 16.2).
+   *
+   * Runs unkeyed on the facade's queue, so it does not block other databases, and its own awaits
+   * are the points at which every other op interleaves: that is what lets a reading app keep
+   * answering queries while a bundle downloads.
+   */
+  async importDatabase({
+    database,
+    overwrite,
+    total,
+    port,
+  }: {
+    database: string;
+    overwrite: boolean;
+    total?: number;
+    port: MessagePort;
+  }) {
+    requireInit();
+    const storage = storageName(database);
+    const target = importTarget();
+    const puller = new ChunkPuller(port);
+
+    if (importing.has(storage)) {
+      puller.close();
+      throw importError(IMPORT_IN_PROGRESS, `An import of ${database} is already running`);
+    }
+    const existed = await target.exists(storage);
+    if (existed && !overwrite) {
+      puller.close();
+      throw importError(IMPORT_NAME_TAKEN, `Database ${database} already exists. Pass overwrite: true to replace it.`);
+    }
+    // Refuse before a byte is read rather than after the download: a transaction cannot be carried
+    // across the file being replaced, and rolling one back silently is not on offer.
+    for (const conn of connectionsFor(database)) {
+      if (conn.isTransactionActive) {
+        puller.close();
+        throw importError(
+          IMPORT_TRANSACTION_ACTIVE,
+          `Database ${database} has an open transaction, which cannot survive being replaced`,
+        );
+      }
+    }
+
+    importing.add(storage);
+    const progress = (phase: string, loaded: number) =>
+      raise(EV_IMPORT_DATABASE_PROGRESS, {
+        database,
+        phase,
+        loaded,
+        ...(total !== undefined ? { total } : {}),
+      });
+
+    let bytes = 0;
+    try {
+      progress('streaming', 0);
+      bytes = await stageAndVerify(target, storage, puller, (loaded) => progress('streaming', loaded));
+      progress('verifying', bytes);
+
+      const staging = stagingName(storage);
+      // Everything from here to the end of the publish addresses the target name, so it is gated:
+      // no other op may touch it while its file is being replaced (PLAN 16.4c).
+      publishing.add(storage);
+      try {
+        const reopen = connectionsFor(database).map((conn) => conn.isReadonly);
+        for (const conn of connectionsFor(database)) {
+          conn.close();
+          connections.delete(connKey(database, conn.isReadonly));
+        }
+        progress('publishing', bytes);
+        if (existed) {
+          // The marker is what makes this atomic across a crash: init finishes or undoes it.
+          await images.setMeta(SWAP_MARKER, { storage, staging });
+          await target.remove(storage);
+        }
+        await target.publish(staging, storage);
+        await target.remove(staging);
+        if (existed) await images.setMeta(SWAP_MARKER, null);
+        for (const readonly of reopen) {
+          const conn = tier === 1 ? openRaw(storage, readonly) : await openTier2(storage, readonly);
+          connections.set(connKey(database, readonly), conn);
+        }
+      } finally {
+        publishing.delete(storage);
+      }
+      progress('done', bytes);
+      return { database, bytes, replaced: existed };
+    } finally {
+      importing.delete(storage);
+      puller.close();
+    }
+  },
+
+  /** Test hook: the wasm heap, the one memory figure a worker can measure about itself (S9). */
+  async wasmHeapSize() {
+    requireInit();
+    return { bytes: sqlite3.wasm.heap8u().byteLength };
   },
 
   /**

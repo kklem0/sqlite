@@ -2,6 +2,8 @@ import { Capacitor, WebPlugin } from '@capacitor/core';
 
 import type {
   CapacitorSQLitePlugin,
+  capSQLiteImportDatabaseOptions,
+  capSQLiteImportDatabaseResult,
   capConnectionOptions,
   capAllConnectionsOptions,
   capChangeSecretOptions,
@@ -38,6 +40,7 @@ import type {
 } from './definitions';
 import { WorkerClient } from './web/client';
 import { WEBSTORE_NOT_OPEN, messageOf, prefixed } from './web/errors';
+import { feedSource } from './web/import-source';
 import { connectionNameFromFile, getLocalDiskAdapter } from './web/localdisk';
 import type {
   JeepMigrationResult,
@@ -649,6 +652,40 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
     const configured = getSqliteWebOptions().assetsPath;
     const base = typeof document !== 'undefined' ? document.baseURI : self.location.href;
     return new URL(configured ?? 'assets/databases/', base).href;
+  }
+
+  ////////////////////////////////////
+  ////// FORK-ONLY ADDITIVE API (PLAN 16)
+  ////////////////////////////////////
+
+  /**
+   * Take a byte source the caller owns and make it a database.
+   *
+   * The source is pulled one chunk at a time, so a multi-hundred-megabyte bundle costs one chunk
+   * of memory rather than its own size, and the app never has to hold the download. The bytes land
+   * in a staging name and are verified before anything replaces the target, so a truncated or
+   * corrupt stream leaves an existing database exactly as it was.
+   */
+  async importDatabase(options: capSQLiteImportDatabaseOptions): Promise<capSQLiteImportDatabaseResult> {
+    this.ensureStore();
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const source = CapacitorSQLiteWeb.optionValue<any>(options, 'source');
+    const overwrite = options.overwrite ?? false;
+
+    const feed = feedSource(source);
+    const total = options.totalBytes ?? feed.total;
+    try {
+      return await this.client.call(
+        'importDatabase',
+        { database, overwrite, ...(total !== undefined ? { total } : {}), port: feed.port },
+        undefined,
+        [feed.port],
+      );
+    } catch (err) {
+      throw prefixed('ImportDatabase', err);
+    } finally {
+      feed.close();
+    }
   }
 
   ////////////////////////////////////
