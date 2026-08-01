@@ -39,11 +39,28 @@ import type {
 import { WorkerClient } from './web/client';
 import { WEBSTORE_NOT_OPEN, messageOf, prefixed } from './web/errors';
 import { connectionNameFromFile, getLocalDiskAdapter } from './web/localdisk';
-import type { SerializedUpgrade, Tier, WorkerInitResult } from './web/protocol';
+import type { JeepMigrationResult, SerializedUpgrade, Tier, WorkerInitResult } from './web/protocol';
 import { EV_PICK_DATABASE_ENDED, EV_SAVE_TO_DISK, EV_HTTP_REQUEST_ENDED } from './web/protocol';
 import { ConnectionRegistry, parseKey, reconcile } from './web/registry';
 import { connKey, storageName } from './web/worker/paths';
 import { getSqliteWebOptions } from './web/worker-factory';
+
+/**
+ * The one-time jeep-sqlite import is loud when it does something and louder when it cannot.
+ * A store this plugin fails to migrate leaves the legacy data exactly where it was, so the app
+ * still boots; the warning is what tells the developer their users' data is still in the old
+ * place. Silence means there was nothing to migrate.
+ */
+function reportMigration(migration: WorkerInitResult['migration']): void {
+  if (!migration) return;
+  if (migration.migrated.length > 0) {
+    console.info(
+      `[capacitor-sqlite] migrated ${migration.migrated.length} database(s) out of jeep-sqlite: ` +
+        `${migration.migrated.join(', ')}.`,
+    );
+  }
+  if (migration.warning) console.warn(`[capacitor-sqlite] ${migration.warning}`);
+}
 
 /**
  * Web implementation backed by `@sqlite.org/sqlite-wasm` in a dedicated worker.
@@ -65,6 +82,7 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
       this.client.onEvent = (event, data) => this.notifyListeners(event, data);
       await this.client.start();
       this.store = await this.client.call('init', getSqliteWebOptions());
+      reportMigration(this.store?.migration);
     } catch (err) {
       this.store = null;
       throw prefixed('initWebStore', err);
@@ -74,6 +92,15 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   /** Which durability tier the store selected. Additive; not part of CapacitorSQLitePlugin. */
   getWebStoreTier(): Tier | null {
     return this.store?.tier ?? null;
+  }
+
+  /**
+   * What the one-time jeep-sqlite import did on this boot, or null when it had nothing to do.
+   * Additive; not part of CapacitorSQLitePlugin. Useful for telling a user their data moved, and
+   * for noticing the warning path in an app that suppresses console output.
+   */
+  getJeepMigration(): JeepMigrationResult | null {
+    return this.store?.migration ?? null;
   }
 
   /**

@@ -20,6 +20,8 @@ import { ImageStore, deserializeInto } from './images';
 import { exportJson } from './json/export';
 import { importJson } from './json/import';
 import { isJsonSQLite, parseJsonSQLite } from './json/validate';
+import type { JeepMigrationTarget } from './migrate-jeep';
+import { migrateFromJeep } from './migrate-jeep';
 import { connKey, fromPoolPath, poolPath, reserveCapacity, storageName } from './paths';
 import * as sync from './sync';
 import { selectTier } from './tiers';
@@ -71,6 +73,38 @@ function assetTarget(): AssetTarget {
       } else {
         await images.put(storage, bytes);
       }
+    },
+  };
+}
+
+/**
+ * The tier-specific half of the jeep-sqlite migration. Adoption goes through the same import
+ * path a downloaded database takes; verification opens what was adopted and asks sqlite whether
+ * it is a database at all, which is the only check that would catch a truncated legacy image.
+ */
+function migrationTarget(): JeepMigrationTarget {
+  const target = assetTarget();
+  return {
+    exists: (storage) => target.exists(storage),
+    adopt: (storage, bytes) => target.adopt(storage, bytes),
+    verify: async (storage) => {
+      // The presence check comes first and is not optional. Opening a tier 2 database whose image
+      // is missing yields an empty `:memory:` database, and `integrity_check` says `ok` to that,
+      // so without this a write that never reached IndexedDB would be reported as migrated and
+      // the legacy copy deleted.
+      if (!(await target.exists(storage))) throw new Error('nothing was stored under that name');
+      const conn = tier === 1 ? openRaw(storage, false) : await openTier2(storage, false);
+      try {
+        const [row] = conn.query('PRAGMA integrity_check');
+        const verdict = row?.integrity_check;
+        if (verdict !== 'ok') throw new Error(`integrity_check returned ${verdict ?? 'nothing'}`);
+      } finally {
+        if (conn.isOpen) conn.close();
+      }
+    },
+    discard: async (storage) => {
+      if (tier === 1) poolUtil.unlink(poolPath(storage));
+      else await images.delete(storage);
     },
   };
 }
@@ -156,10 +190,15 @@ const ops: Record<string, (args: any) => any> = {
     tier = selection.tier;
     poolUtil = selection.poolUtil;
     if (tier === 1) await reserveCapacity(poolUtil, 4);
+
+    // Runs before any connection is opened, so an import can never race a live database.
+    const migration = args.skipJeepMigration ? null : await migrateFromJeep(images, migrationTarget());
+
     return {
       tier,
       sqliteVersion: sqlite3.version.libVersion,
       ...(selection.fallbackReason ? { fallbackReason: selection.fallbackReason } : {}),
+      ...(migration && (migration.ran || migration.warning) ? { migration } : {}),
     };
   },
 

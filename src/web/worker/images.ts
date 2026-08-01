@@ -9,12 +9,25 @@
  *
  * Raw IndexedDB on purpose: localforage is not a dependency and will not become one.
  */
-import { IMAGE_STORE_NAME, imageStoreDbName } from '../protocol';
+import { IMAGE_STORE_NAME, IMAGE_STORE_VERSION, META_STORE_NAME, imageStoreDbName } from '../protocol';
 
 function request<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
+  });
+}
+
+/**
+ * Wait for the transaction, not just the request. A write request fires `success` well before its
+ * transaction commits, and the commit can still fail (quota, eviction, a force-closed connection),
+ * so resolving on the request alone reports durable data that was never written.
+ */
+function committed(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
   });
 }
 
@@ -30,10 +43,10 @@ export class ImageStore {
     if (!this.dbPromise) {
       const name = this.name;
       this.dbPromise = new Promise((resolve, reject) => {
-        const req = indexedDB.open(name, 1);
+        const req = indexedDB.open(name, IMAGE_STORE_VERSION);
         req.onupgradeneeded = () => {
-          if (!req.result.objectStoreNames.contains(IMAGE_STORE_NAME)) {
-            req.result.createObjectStore(IMAGE_STORE_NAME);
+          for (const store of [IMAGE_STORE_NAME, META_STORE_NAME]) {
+            if (!req.result.objectStoreNames.contains(store)) req.result.createObjectStore(store);
           }
         };
         req.onsuccess = () => resolve(req.result);
@@ -43,9 +56,17 @@ export class ImageStore {
     return this.dbPromise;
   }
 
-  private async tx(mode: IDBTransactionMode): Promise<IDBObjectStore> {
+  private async tx(mode: IDBTransactionMode, store: string = IMAGE_STORE_NAME): Promise<IDBObjectStore> {
     const db = await this.open();
-    return db.transaction(IMAGE_STORE_NAME, mode).objectStore(IMAGE_STORE_NAME);
+    return db.transaction(store, mode).objectStore(store);
+  }
+
+  /** A write, waited on all the way to the commit. */
+  private async write(store: string, body: (target: IDBObjectStore) => IDBRequest): Promise<void> {
+    const target = await this.tx('readwrite', store);
+    const done = committed(target.transaction);
+    await request(body(target));
+    await done;
   }
 
   async get(storage: string): Promise<Uint8Array | null> {
@@ -58,13 +79,11 @@ export class ImageStore {
   }
 
   async put(storage: string, image: Uint8Array): Promise<void> {
-    const store = await this.tx('readwrite');
-    await request(store.put(image, storage));
+    await this.write(IMAGE_STORE_NAME, (store) => store.put(image, storage));
   }
 
   async delete(storage: string): Promise<void> {
-    const store = await this.tx('readwrite');
-    await request(store.delete(storage));
+    await this.write(IMAGE_STORE_NAME, (store) => store.delete(storage));
   }
 
   async has(storage: string): Promise<boolean> {
@@ -77,6 +96,17 @@ export class ImageStore {
     const store = await this.tx('readonly');
     const keys = await request<IDBValidKey[]>(store.getAllKeys());
     return keys.map((k) => String(k));
+  }
+
+  /** Bookkeeping that is not a database image. Kept out of the image store so it cannot be listed. */
+  async getMeta<T>(key: string): Promise<T | null> {
+    const store = await this.tx('readonly', META_STORE_NAME);
+    const value = await request<any>(store.get(key));
+    return value === undefined ? null : (value as T);
+  }
+
+  async setMeta(key: string, value: unknown): Promise<void> {
+    await this.write(META_STORE_NAME, (store) => store.put(value, key));
   }
 }
 
