@@ -1,4 +1,4 @@
-import { WebPlugin } from '@capacitor/core';
+import { Capacitor, WebPlugin } from '@capacitor/core';
 
 import type {
   CapacitorSQLitePlugin,
@@ -97,6 +97,10 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   private upgrades = new Map<string, SerializedUpgrade[]>();
   private store: WorkerInitResult | null = null;
 
+  /** Connections closed by pauseWebStore, waiting to be reopened. Null when not paused. */
+  private paused: { database: string; readonly: boolean }[] | null = null;
+  private visibilityListener: (() => void) | null = null;
+
   async initWebStore(): Promise<void> {
     if (this.store) return;
     try {
@@ -105,9 +109,106 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
       this.store = await this.client.call('init', getSqliteWebOptions());
       reportPromotion(this.store?.promotion);
       reportMigration(this.store?.migration);
+      this.watchAppState();
     } catch (err) {
       this.store = null;
       throw prefixed('initWebStore', err);
+    }
+  }
+
+  /**
+   * Follow the app in and out of the background, but only under Capacitor native.
+   *
+   * WKWebView invalidates OPFS access handles when the app is suspended, which is why the store
+   * has to be closed and the VFS paused before that happens (PLAN 6.7). `visibilitychange` is the
+   * signal available without taking a dependency on `@capacitor/app`; an app that wants the
+   * precision of `App.appStateChange` can call `pauseWebStore` / `resumeWebStore` itself, and
+   * calling them while this listener is also active is harmless because both are idempotent.
+   *
+   * Deliberately not wired on the plain web: a browser tab going hidden is not a suspension, and
+   * closing every connection on a tab switch would be a bug rather than a protection.
+   */
+  private watchAppState(): void {
+    if (this.visibilityListener) return;
+    if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+    if (!Capacitor.isNativePlatform?.()) return;
+    this.visibilityListener = () => {
+      const going = document.visibilityState === 'hidden';
+      void (going ? this.pauseWebStore() : this.resumeWebStore()).catch((err) => {
+        console.warn(`[capacitor-sqlite] ${going ? 'pausing' : 'resuming'} the store failed: ${messageOf(err)}`);
+      });
+    };
+    document.addEventListener('visibilitychange', this.visibilityListener);
+  }
+
+  private unwatchAppState(): void {
+    if (this.visibilityListener && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityListener);
+    }
+    this.visibilityListener = null;
+  }
+
+  /**
+   * Close every connection and pause the VFS, so the OS can suspend the app without leaving the
+   * pool's access handles half-alive. Idempotent, and a no-op on tier 2, which has no handles.
+   *
+   * `pauseVfs()` throws SQLITE_MISUSE while any database is open, so closing first is part of the
+   * operation rather than something the caller has to remember (M0 finding S4).
+   */
+  async pauseWebStore(): Promise<void> {
+    if (!this.store || this.paused) return;
+    const result = await this.client.call('pause', {});
+    this.paused = result.reopen ?? [];
+    if (result.interrupted?.length > 0) {
+      // In-flight transactions cannot survive the close. Rolled back, and said out loud.
+      console.warn(
+        `[capacitor-sqlite] rolled back an open transaction on ${result.interrupted.join(', ')} ` +
+          'while pausing the store for the background.',
+      );
+    }
+  }
+
+  /**
+   * Unpause and reopen what pauseWebStore closed. When that fails, which is what a real device
+   * suspension can do to a pool behind our back, fall back to the heavy path: tear the worker
+   * down, start a new one, re-run init, and reopen from the same record (PLAN 6.7).
+   */
+  async resumeWebStore(): Promise<void> {
+    if (!this.store || !this.paused) return;
+    const reopen = this.paused;
+    this.paused = null;
+    try {
+      await this.client.call('unpause', {});
+      await this.reopenAll(reopen);
+    } catch (err) {
+      console.warn(`[capacitor-sqlite] unpause failed (${messageOf(err)}), restarting the worker.`);
+      await this.restartWebStore(reopen);
+    }
+  }
+
+  /**
+   * The heavy recovery path, also usable on its own: a fresh worker, a fresh VFS install, and the
+   * given connections reopened. A second worker can take over a paused pool, which is what makes
+   * this work at the engine level (M0 spike item 6).
+   */
+  async restartWebStore(reopen?: { database: string; readonly: boolean }[]): Promise<void> {
+    const wanted = reopen ?? this.registry.keys().map((key) => parseKey(key));
+    this.paused = null;
+    this.client.terminate();
+    this.client.onEvent = (event, data) => this.notifyListeners(event, data);
+    await this.client.start();
+    this.store = await this.client.call('init', getSqliteWebOptions());
+    await this.reopenAll(wanted);
+  }
+
+  private async reopenAll(entries: { database: string; readonly: boolean }[]): Promise<void> {
+    for (const { database, readonly } of entries) {
+      const version = this.registry.get(database, readonly)?.version ?? 1;
+      await this.client.call(
+        'open',
+        { database, readonly, version, upgrades: this.upgrades.get(database) ?? [] },
+        connKey(database, readonly),
+      );
     }
   }
 
@@ -139,8 +240,10 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
    * flush, so call `saveToStore` first if you are on tier 2 and care about unsaved changes.
    */
   async closeWebStore(): Promise<void> {
+    this.unwatchAppState();
     this.client.terminate();
     this.registry.clear();
+    this.paused = null;
     this.store = null;
   }
 
