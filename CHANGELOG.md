@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## Fork releases (`sssf-capacitor-sqlite`)
+
+Entries below this heading exist only on the fork's release branch. Upstream releases and their
+generated entries continue underneath, unchanged, and the fork tracks them.
+
+### 8.2.0-sssf.1 (2026-08-01)
+
+First fork release. Contents are upstream 8.1.0 plus the unreleased 8.2.0 work below: the web
+engine rewritten onto `@sqlite.org/sqlite-wasm` with OPFS persistence, the one-time jeep-sqlite
+data migration, and the additive `importDatabase` and `getWebStoreInfo` methods. Native and
+Electron are untouched.
+
+* **fork:** rename the package to `sssf-capacitor-sqlite` and point repository, bugs and homepage at the fork; author and MIT license unchanged
+* **fork:** never install alongside `@capacitor-community/sqlite`, since the iOS pod and Android Gradle identities are deliberately unchanged and would collide
+* **fork:** the intent is to retire this package once the work is upstream; switching back is a dependency change with no API differences
+
 ## [8.2.0](https://github.com/capacitor-community/sqlite/compare/v8.1.0...v8.2.0) (2026-08-01)
 
 
