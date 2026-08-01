@@ -72,6 +72,25 @@ describe('worker load failures name the right cause', () => {
     expect(err.code).toBe('WORKER_LOAD_FAILED');
   });
 
+  test('HTML served where the worker should be is a bundler problem, not an old browser', () => {
+    // What a 404 looks like from the browser: the dev server answers with index.html and the
+    // parser stops on its first tag. Measured on Chrome 150 with a Vite build (PLAN 18.1 P3).
+    for (const raw of ["Uncaught SyntaxError: Unexpected token '<'", 'SyntaxError: Unexpected token <']) {
+      const err = workerLoadFailure(raw);
+      expect(err.code).toBe('WORKER_LOAD_FAILED');
+      expect(err.message).toMatch(/returned HTML instead of JavaScript/i);
+      expect(err.message).toMatch(/setSqliteWorkerFactory/);
+      // The claim that would send a developer chasing a browser floor that is not the problem.
+      expect(err.message).not.toMatch(/below the minimum this plugin supports/i);
+      expect(err.message).toContain(raw);
+    }
+  });
+
+  test('a DOCTYPE in the message is read the same way', () => {
+    const err = workerLoadFailure('Uncaught SyntaxError: Unexpected token <!DOCTYPE html>');
+    expect(err.code).toBe('WORKER_LOAD_FAILED');
+  });
+
   test('an empty browser message still produces a usable error', () => {
     expect(workerLoadFailure('').message).toMatch(/no further detail from the browser/);
   });
