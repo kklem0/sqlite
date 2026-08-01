@@ -15,6 +15,16 @@ All notable changes to this project will be documented in this file. See [commit
 * **web:** only one tab per origin may own the store. A second tab now gets an explicit error from `initWebStore()` instead of racing the first.
 * **web:** foreign keys are now enforced. `PRAGMA foreign_keys` is set ON at open, as it already was on every other platform, so a schema that was quietly violating its own constraints will start reporting them.
 
+### Additive API (web only, fork)
+
+These are new methods on `CapacitorSQLitePlugin` and the `SQLiteConnection` wrapper. Nothing
+existing changes shape, and both reject on iOS, Android and Electron, where the plugin does not
+register them.
+
+* **web:** add `importDatabase({ database, source, overwrite?, totalBytes? })`, taking a `Uint8Array`, a `Blob` or a `ReadableStream`. The source is pulled one chunk at a time and never held whole, so an app that downloads its own bundles with authenticated, resumable requests can hand the stream straight over. The bytes are staged and verified with `PRAGMA integrity_check` before anything replaces the target, so a truncated or corrupt source leaves an existing database untouched
+* **web:** add the `sqliteImportDatabaseProgressEvent` event, reporting `{ database, phase, loaded, total? }` as an import streams, verifies and publishes
+* **web:** add `getWebStoreInfo()`, reporting the durability tier, where the bytes rest, the SQLite version, the pool identity, and storage quota and usage where the browser implements `navigator.storage.estimate`
+
 ### Features
 
 * **web:** replace the jeep-sqlite pass-through with an in-repo engine on `@sqlite.org/sqlite-wasm`, running in a dedicated worker, with databases stored as real files in OPFS through the `opfs-sahpool` VFS and no COOP/COEP headers required
