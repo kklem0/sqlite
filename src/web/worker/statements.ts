@@ -158,3 +158,42 @@ export function replaceUndefinedByNull(values: any[] | undefined): any[] {
   if (!values || values.length === 0) return [];
   return values.map((value) => (value === undefined ? null : value));
 }
+
+/**
+ * The soft-delete rewrite (PLAN 2.4), ported from `utilsSQLite.deleteSQL` in
+ * `electron/src/electron-utils/` (MIT, this repo) and cross-checked against jeep-sqlite (MIT),
+ * which carries the identical logic.
+ *
+ * When a database participates in sync (its tables carry both `last_modified` and
+ * `sql_deleted`), a DELETE is not a delete: the row is marked instead, so the next export can
+ * tell the server about it. `deleteExportedRows` is what eventually removes it for real.
+ *
+ * `AND sql_deleted = 0` on the rewritten statement keeps the operation idempotent: deleting an
+ * already-soft-deleted row reports zero changes rather than touching `last_modified` again.
+ */
+export function extractTableName(statement: string): string | null {
+  const match = stripNoise(statement).match(/(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([^\s;(]+)/i);
+  return match?.[1] ?? null;
+}
+
+export function extractWhereClause(statement: string): string | null {
+  const match = stripNoise(statement).match(/WHERE\s(.+?)(?:ORDER\s+BY|LIMIT|$)/is);
+  return match?.[1] ? match[1].trim() : null;
+}
+
+/**
+ * Rewrite a DELETE into a soft delete. Returns the statement unchanged when the database does
+ * not participate in sync, so this is safe to run over every DELETE.
+ */
+export function softDeleteRewrite(statement: string, syncEnabled: boolean): string {
+  if (!syncEnabled) return statement;
+  if (statementKind(statement) !== 'DELETE') return statement;
+
+  const tableName = extractTableName(statement);
+  if (!tableName) throw new Error('deleteSQL: cannot find a table name');
+  const whereClause = extractWhereClause(statement);
+  if (!whereClause) throw new Error('deleteSQL: cannot find a WHERE clause');
+
+  const where = whereClause.endsWith(';') ? whereClause.slice(0, -1) : whereClause;
+  return `UPDATE ${tableName} SET sql_deleted = 1 WHERE ${where} AND sql_deleted = 0;`;
+}

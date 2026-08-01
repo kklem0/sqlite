@@ -120,7 +120,9 @@ function createTableData(conn: Connection, table: JsonTable, mode: string, progr
       if (stored.length > 0 && sameValues(row, stored)) continue;
     }
     const bind = statement.startsWith('DELETE') ? [] : row;
-    changes += conn.run(statement, bind, false).changes;
+    // rewriteDeletes = false: a row arriving with sql_deleted = 1 is replicating a deletion that
+    // already happened upstream, so it must remove the local row rather than re-mark it.
+    changes += conn.run(statement, bind, false, false).changes;
   }
   progress.call(null, `Table ${table.name} data imported`);
   return changes;

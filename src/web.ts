@@ -348,7 +348,7 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   }
 
   ////////////////////////////////////
-  ////// JSON PIPELINE
+  ////// JSON PIPELINE AND SYNC TABLES
   ////////////////////////////////////
 
   async isJsonValid(options: capSQLiteImportOptions): Promise<capSQLiteResult> {
@@ -376,23 +376,33 @@ export class CapacitorSQLiteWeb extends WebPlugin implements CapacitorSQLitePlug
   }
 
   async createSyncTable(options: capSQLiteOptions): Promise<capSQLiteChanges> {
-    console.log('createSyncTable', options);
-    throw this.unimplemented('Not implemented on web.');
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    this.rejectReadonly(options.readonly, 'CreateSyncTable');
+    this.requireOpen(database, false, 'CreateSyncTable');
+    const result = await this.call('createSyncTable', { database }, database, false);
+    return { changes: { changes: result.changes, lastId: result.lastId } };
   }
 
   async setSyncDate(options: capSQLiteSyncDateOptions): Promise<void> {
-    console.log('setSyncDate', options);
-    throw this.unimplemented('Not implemented on web.');
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const syncdate = CapacitorSQLiteWeb.optionValue<string>(options, 'syncdate');
+    this.rejectReadonly(options.readonly, 'SetSyncDate');
+    this.requireOpen(database, false, 'SetSyncDate');
+    await this.call('setSyncDate', { database, syncdate }, database, false);
   }
 
   async getSyncDate(options: capSQLiteOptions): Promise<capSQLiteSyncDate> {
-    console.log('getSyncDate', options);
-    throw this.unimplemented('Not implemented on web.');
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    const readonly = options.readonly ?? false;
+    this.requireOpen(database, readonly, 'GetSyncDate');
+    return this.call('getSyncDate', { database, readonly }, database, readonly);
   }
 
   async deleteExportedRows(options: capSQLiteOptions): Promise<void> {
-    console.log('deleteExportedRows', options);
-    throw this.unimplemented('Not implemented on web.');
+    const database = CapacitorSQLiteWeb.optionValue<string>(options, 'database');
+    this.rejectReadonly(options.readonly, 'DeleteExportedRows');
+    this.requireOpen(database, false, 'DeleteExportedRows');
+    await this.call('deleteExportedRows', { database }, database, false);
   }
 
   async copyFromAssets(options: capSQLiteFromAssetsOptions): Promise<void> {
