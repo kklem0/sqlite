@@ -68,9 +68,20 @@ export type WorkerResponse =
 /** Sent unsolicited by the worker as soon as its module body has run. */
 export const BOOT_ID = -1;
 
-/** The IndexedDB database and object store backing tier 2 images. */
-export const IMAGE_STORE_DB = 'capacitorSqliteStore';
+/**
+ * The IndexedDB database and object store backing tier 2 images.
+ *
+ * The database name is derived from the pool name so that the two tiers namespace identically.
+ * On tier 1 the pool name already isolates one store from another (M0 finding S11); without the
+ * same treatment here, two stores configured with different pool names would share their tier 2
+ * databases while keeping their tier 1 ones separate, which is a difference nobody would expect
+ * to depend on which tier the browser happened to select.
+ */
 export const IMAGE_STORE_NAME = 'databases';
+
+export function imageStoreDbName(poolName: string): string {
+  return `${poolName}-store`;
+}
 
 /**
  * Web Locks name held for the lifetime of the worker so only one context owns the pool.

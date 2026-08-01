@@ -34,7 +34,8 @@ const initModule = sqlite3InitModule as unknown as (config?: Sqlite3InitConfig) 
 let sqlite3: any = null;
 let poolUtil: any = null;
 let tier: 1 | 2 = 2;
-const images = new ImageStore();
+/** Constructed at init, because its IndexedDB name is derived from the configured pool name. */
+let images = new ImageStore('capacitor-sqlite');
 const connections = new Map<string, Connection>();
 
 function requireInit(): void {
@@ -97,6 +98,7 @@ const ops: Record<string, (args: any) => any> = {
         ...(args.wasmUrl ? { locateFile: () => args.wasmUrl as string } : {}),
       });
     }
+    images = new ImageStore(args.poolName);
     const selection = await selectTier(sqlite3, args);
     tier = selection.tier;
     poolUtil = selection.poolUtil;
